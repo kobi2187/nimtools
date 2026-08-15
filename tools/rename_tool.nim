@@ -1,5 +1,19 @@
 import std/[os, strutils, parseopt, osproc, streams]
-import ../shared/[source_rewriter, compiler_env, exit_codes]
+import ../shared/[source_rewriter, compiler_env, exit_codes, scope_rename]
+export scope_rename
+
+proc renameScopedInFile*(filePath, oldName, newName: string;
+                         line, col: int): RenameScopedResult =
+  ## Scope-aware rename of one binding in one file. Unlike the token rename
+  ## below, this resolves which declaration the position refers to and rewrites
+  ## only the uses that bind to it — a local `i` stays local.
+  if not fileExists(filePath):
+    return RenameScopedResult(status: srNotFound,
+      message: "File not found: " & filePath)
+  let source = readFile(filePath)
+  result = renameScoped(source, filePath, oldName, newName, line, col)
+  if result.status == srRenamed:
+    writeFile(filePath, result.source)
 
 type
   RenameStatus* = enum

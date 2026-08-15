@@ -76,12 +76,35 @@ proc dispatch(args: seq[string]): int =
     of mvRefused: stderr.writeLine r.message; ExitRefused
     of mvError:   usage("Error: " & r.message)
   of "rename-symbol", "rename":
-    if rest.len < 3: return usage("Usage: nimtools rename-symbol <file.nim> <oldName> <newName>")
-    let r = renameInFile(rest[0], rest[1], rest[2])
-    case r.status
-    of rnRenamed: echo r.message; ExitOk
-    of rnNoOp:    echo r.message; ExitOk   # nothing to change is not a failure
-    of rnError:   usage("Error: " & r.message)
+    # --at:LINE:COL selects scope-aware mode: rename the binding at that
+    # position and only the uses that resolve to it. Without it the rename is
+    # token-level and hits every matching identifier in the file.
+    var at = ""
+    var pos: seq[string] = @[]
+    for a in rest:
+      if a.startsWith("--at:"): at = a[5..^1] else: pos.add a
+    if pos.len < 3:
+      return usage("Usage: nimtools rename-symbol [--at:LINE:COL] <file.nim> <oldName> <newName>")
+
+    if at.len > 0:
+      let parts = at.split(':')
+      if parts.len != 2:
+        return usage("Error: --at expects LINE:COL, got '" & at & "'")
+      let line = try: parseInt(parts[0]) except ValueError: -1
+      let col = try: parseInt(parts[1]) except ValueError: -1
+      if line < 1 or col < 0:
+        return usage("Error: --at expects a 1-based line and 0-based column, got '" & at & "'")
+      let r = renameScopedInFile(pos[0], pos[1], pos[2], line, col)
+      case r.status
+      of srRenamed:  echo r.message; ExitOk
+      of srConflict: stderr.writeLine r.message; ExitRefused
+      of srNotFound: usage("Error: " & r.message)
+    else:
+      let r = renameInFile(pos[0], pos[1], pos[2])
+      case r.status
+      of rnRenamed: echo r.message; ExitOk
+      of rnNoOp:    echo r.message; ExitOk   # nothing to change is not a failure
+      of rnError:   usage("Error: " & r.message)
   of "inspect", "json":
     if rest.len < 1: return usage("Usage: nimtools inspect <file.nim>")
     let report = inspectFile(rest[0])

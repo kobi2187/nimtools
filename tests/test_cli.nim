@@ -32,6 +32,32 @@ suite "delegation works outside project root":
   test "cyc runs from another cwd":
     check run("cyc " & Scratch / "f.nim", workDir = "/tmp").exitCode == 0
 
+suite "scoped rename through the CLI":
+  setup:
+    removeDir(Scratch); createDir(Scratch)
+    writeFile(Scratch / "s.nim", """
+proc a(): int =
+  var i = 1
+  i
+
+proc b(): int =
+  var i = 2
+  i
+""")
+
+  test "--at renames only the binding at that position":
+    let r = run("rename-symbol --at:2:6 " & Scratch / "s.nim i idx")
+    check r.exitCode == 0
+    let got = readFile(Scratch / "s.nim")
+    check "var idx = 1" in got
+    check "var i = 2" in got
+
+  test "a bad --at position is an error":
+    check run("rename-symbol --at:99:0 " & Scratch / "s.nim i idx").exitCode == 1
+
+  test "malformed --at is an error":
+    check run("rename-symbol --at:nonsense " & Scratch / "s.nim i idx").exitCode == 1
+
 suite "outline writes to stdout by default":
   setup:
     removeDir(Scratch); createDir(Scratch)
