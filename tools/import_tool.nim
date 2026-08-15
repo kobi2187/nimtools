@@ -6,19 +6,44 @@ proc extractExistingImports*(root: PNode): seq[string] =
   ## Returns a list of all imported module names from top-level import statements.
   if root == nil: return @[]
   
+  proc renderModule(n: PNode): string =
+    ## Renders a module path node with no incidental whitespace.
+    ## `renderTree` emits `std / json` for nkInfix, which never compares equal
+    ## to the `std/json` a caller passes in — so normalize it away here.
+    renderTree(n).replace(" ", "").strip()
+
+  proc expand(n: PNode, prefix: string, acc: var seq[string]) =
+    ## Expands one module clause into a fully-qualified entry per module.
+    ## Handles `os`, `std/json`, `std/[os, json]` and `pkg/sub/[a, b]`.
+    if n == nil or n.kind in {nkEmpty, nkCommentStmt}: return
+    let qualify = proc(s: string): string =
+      if prefix.len > 0: prefix & "/" & s else: s
+    case n.kind
+    of nkIdent:
+      acc.add qualify(n.ident.s)
+    of nkInfix:
+      # `a / b` — left side extends the prefix, right side may be a group.
+      if n.len >= 3 and n[0].kind == nkIdent and n[0].ident.s == "/":
+        expand(n[2], qualify(renderModule(n[1])), acc)
+      else:
+        acc.add qualify(renderModule(n))
+    of nkBracket:
+      # `[a, b]` in import position parses as nkBracket (an array literal),
+      # NOT nkBracketExpr — every child is a module, there is no type prefix.
+      for c in n: expand(c, prefix, acc)
+    of nkBracketExpr:
+      # Generic-looking form; first child is the prefix, rest are modules.
+      if n.len > 1:
+        for i in 1 ..< n.len: expand(n[i], qualify(renderModule(n[0])), acc)
+      else:
+        acc.add qualify(renderModule(n))
+    else:
+      acc.add qualify(renderModule(n))
+
   proc collect(n: PNode, acc: var seq[string]) =
     if n == nil: return
     if n.kind in {nkImportStmt, nkImportExceptStmt, nkFromStmt}:
-      # Render each child
-      for c in n:
-        if c.kind == nkIdent:
-          acc.add c.ident.s
-        elif c.kind == nkBracketExpr and c.len > 1:
-          let prefix = renderTree(c[0])
-          for i in 1..<c.len:
-            acc.add prefix & "/" & renderTree(c[i])
-        elif c.kind notin {nkEmpty, nkCommentStmt}:
-          acc.add renderTree(c).strip()
+      for c in n: expand(c, "", acc)
     elif hasSons(n) and n.kind == nkStmtList:
       for c in n: collect(c, acc)
       
