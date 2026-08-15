@@ -38,5 +38,5 @@ unconditional: a node is recorded *and* descended into.
 
 ## Known limits
 - Parser-level only: no symbol resolution, no cross-file knowledge.
-- `renderTypeNode` is cc=42 and is the most complex proc in the tree; a drifted
-  copy still lives in `nimoutline.nim`.
+- `renderTypeNode` is cc=42 and is the most complex proc in the tree. A drifted
+  copy still lives in `cyc.nim`, which remains self-contained.

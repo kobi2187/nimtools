@@ -25,64 +25,71 @@ nim c --path:$(dirname $(dirname $(readlink -f $(command -v nim)))) -d:release <
 
 ## Tests
 
-**There are none.** `test_refactor_src.nim` is a scratch fixture with no assertions, and the
-refactoring tools *mutate it in place* when run against it. Every tool rewrites files
-destructively, and the repo is **not a git repository** — there is no undo. Copy fixtures to a
-scratch dir before exercising any rewrite path.
+```bash
+./tests/run.sh                          # all suites
+nim c --hints:off -r tests/test_move.nim # one suite
+```
 
-Verification substitute currently in use: run a tool, then `nim check` the output file.
+`std/unittest`, no dependencies. Suites write fixtures to the scratch dir, never into the repo.
+`test_refactor_src.nim` at the root is an older manual fixture with no assertions — the tools
+mutate it in place if you run them against it.
+
+Since every write tool rewrites files destructively, a fix without a test is not finished.
 
 ## Architecture
 
 ```
-nimtools.nim        Umbrella CLI — dispatches subcommands
+nimtools.nim        Umbrella CLI — dispatch() routes subcommands, returns exit codes
 ├── tools/          Each module is BOTH a library (exports procs) and a binary (isMainModule)
 │   ├── find_import_tool.nim   symbol search across stdlib/nimble/project -> import path
 │   ├── import_tool.nim        add/remove imports; owns extractExistingImports
-│   ├── move_tool.nim          move procs/types between files
-│   ├── rename_tool.nim        token-level rename (+ an unwired nimsuggest path)
-│   └── inspect_tool.nim       JSON model of a file
+│   ├── move_tool.nim          move procs/types; refuses unsafe moves
+│   ├── rename_tool.nim        token-level rename (semantic path refuses; not built yet)
+│   ├── inspect_tool.nim       JSON model of a file
+│   ├── extract_tool.nim       one symbol: signature first, --body opt-in
+│   └── doc_tool.nim           routines missing doc comments
 └── shared/
     ├── compiler_env.nim       parser setup with silenced hooks + structured error capture
-    ├── ast_utils.nim          AST helpers: names, exports, render, cyclomatic complexity
+    ├── ast_utils.nim          walkers, names, render, doc comments, complexity
     ├── source_rewriter.nim    line-range edit, export marker, lexer-guided rename
-    └── path_resolver.nim      file path -> idiomatic import path
+    ├── path_resolver.nim      file path -> idiomatic import path
+    └── exit_codes.nim         0 ok / 1 error / 2 refused
 
-cyc.nim             SELF-CONTAINED complexity CLI  — duplicates ast_utils
-nimoutline.nim      SELF-CONTAINED outline CLI     — duplicates ast_utils
+cyc.nim             SELF-CONTAINED complexity CLI  — still duplicates ast_utils
+nimoutline.nim      outline CLI, built on shared/  — stdout by default, -o for a file
+tests/              std/unittest suites; ./tests/run.sh
+thoughts/module_summaries/   per-module contract + rationale; read before the source
 ```
 
 Three things about this layout are non-obvious and matter:
 
-**1. `cyc.nim` and `nimoutline.nim` do not use `shared/`.** They carry their own copies of
-`hasSons`, `routineName`, `renderTypeNode`, `renderTypeDefConcise`, `countBranches`,
-`isDispatchArm`, `RoutineKinds`, `BranchKinds`. The copies have **already drifted** — e.g.
-`ast_utils.renderTypeNode` handles `nkVarTy` and guards `n.len` before indexing; `nimoutline`'s
-copy does neither. When editing AST logic, check all three locations.
+**1. `cyc.nim` still does not use `shared/`.** It carries its own copies of `hasSons`,
+`routineName`, `renderTypeNode`, `countBranches`, `isDispatchArm`, `RoutineKinds`, `BranchKinds`.
+When editing AST logic, check both locations.
 
-**2. `nimtools outline` / `nimtools cyc` shell out**, they do not import:
+`nimoutline.nim` was converted to the shared modules — its copies had already drifted (no
+`nkVarTy` case, unguarded `n[1]`/`n[2]` indexing) and its walker missed nested routines, so it
+disagreed with `extract` about the same file. `cyc.nim` is the last holdout; its complexity
+algorithm is logically equivalent to `ast_utils`, so the risk there is drift, not a live bug.
+
+**2. `nimtools outline` / `nimtools cyc` shell out** rather than importing, via `delegate()`,
+which resolves the helper next to the running executable (`getAppDir()`). Do not reintroduce a
+relative `./nimoutline` — it only resolves when the cwd happens to be the project root, and fails
+with exit 127 everywhere else.
+
+**3. Traversal is centralised — do not hand-roll a walker.** `collectRoutines` /
+`collectTypeDefs` in `shared/ast_utils.nim` recurse unconditionally (record a node *and* descend
+into it), so nested routines are found and bodiless forward declarations are skipped.
+
+The bug this replaced is easy to reintroduce: putting recursion in a trailing `elif` after the
+record branches makes traversal stop at every routine.
 
 ```nim
-execShellCmd("./nimoutline " & ...)   # nimtools.nim
+elif hasSons(n): for c in n: walk(c)    # WRONG: unreachable for routines
 ```
 
-Hardcoded relative paths, so both subcommands fail with exit 127 outside the project root.
-Replacing these with direct imports would also collapse the duplication in (1).
-
-**3. Two different AST traversal shapes coexist, and they disagree.** `inspect_tool`,
-`move_tool`, and `find_import_tool` all use:
-
-```nim
-if n.kind == nkTypeDef:      ...        # records, does NOT recurse
-elif n.kind in RoutineKinds: ...        # records, does NOT recurse
-elif hasSons(n): for c in n: walk(c)    # recursion only in the final elif
-```
-
-Recursion living in the last `elif` means traversal **stops at every routine**, so nested procs
-are never seen. `cyc.nim`'s `collect` recurses unconditionally and does find them. The two tools
-therefore report different routine sets for the same file. Do not use matching *totals* as
-evidence of agreement — they coincide on some files while counting different sets (`inspect`
-counts bodiless forward declarations and misses nested procs; `cyc` does the opposite).
+`find_import_tool.nim` still has a private walker with this shape. `cyc.nim` and `nimoutline.nim`
+have their own correct-but-separate traversals.
 
 ## Design decisions worth preserving
 
@@ -97,22 +104,34 @@ counts bodiless forward declarations and misses nested procs; `cyc` does the opp
 
 Keep this reasoning through any refactor of the complexity code.
 
-## Known correctness state
+## The agent contract
 
-Full defect analysis with reproductions lives in
-`thoughts/ledgers/CONTINUITY_CLAUDE-nimtools.md`. Read it before touching the refactoring tools.
-Headlines:
+The audience is AI-agent tooling, so **the exit code and the output shape are the API**. An agent
+cannot eyeball a diff, which drives three rules:
 
-- `move-symbol` **emits non-compiling code** — no dependency analysis, so moving a proc leaves
-  its types behind and adds no back-import.
-- `add-import` is **not idempotent** — `renderTree` renders `std/json` as `std / json` (with
-  spaces), so the dedupe guard never matches.
-- Every rewrite path goes through `splitLines()` / `join("\n")`, which **silently strips CRLF**.
-- `rename-symbol` is **single-file only** by design, and correctly skips strings and comments.
+**Exit codes** (`shared/exit_codes.nim`): `0` completed — *including a no-op, which is success*;
+`1` error (missing file, parse failure, symbol not found); `2` refused — understood the request
+and declined because carrying it out would emit broken code.
 
-Audience is AI-agent tooling, so exit codes and JSON shape are part of the contract: distinguish
-no-op from error (`rename` currently exits 1 on a successful no-op), and note that `inspect`
-emits well-formed but **inaccurate** JSON due to the traversal issue above.
+**Refuse rather than corrupt.** `move-symbol` analyses whether the moved code references symbols
+that would stay behind, and declines with the names listed. Analysis is parser-level, so it is
+conservative in the safe direction: it may refuse a movable symbol, but will not emit undeclared
+references. `--force` overrides.
+
+**Emit resolvable identifiers.** `inspect` reports imports as `std/os`, not the parser's rendered
+`"std / [os, json]"`. The spaced form was the cause of both the dirty JSON and the duplicate-import
+bug — nothing could match against it.
+
+### Scope limit worth knowing
+
+`rename-symbol` is token-level: it correctly skips strings and comments, but has **no scope
+model**, so it renames every matching identifier in the file — rename a local `i` and you hit
+every `i`. It cannot cross files. `renameSemantic` refuses rather than pretending. Scope-aware
+rename needs a scope-stack walker; cross-file rename needs nimsuggest.
+
+Historical defect analysis with reproductions is in
+`thoughts/ledgers/CONTINUITY_CLAUDE-nimtools.md` — the B1/B2/B4/B5/B6/B9 entries are fixed and
+covered by tests; read it for the reasoning, not the current state.
 
 ## Self-audit
 
@@ -124,6 +143,6 @@ The toolkit measures itself; `--gate`/`--debt` are not enforced anywhere (no CI,
 
 ## Artifacts
 
-Compiled binaries (`nimtools`, `cyc`, `nimoutline`, `tools/*_tool`) and generated output
-(`nimoutline.outline.txt`) are checked into the tree, contradicting `cyc.nim`'s own header claim
-that "the binary is gitignored." Per user decision these should be gitignored once VCS exists.
+Binaries are extensionless and sit next to their source, so `.gitignore` lists them by name
+rather than by glob (a `tools/*` rule would need `!*.nim` counter-rules and could swallow future
+source). Add new binaries and test executables to that list explicitly.
