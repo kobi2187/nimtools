@@ -14,6 +14,7 @@ tests/test_cli
 tests/test_extract
 tests/test_inspect
 tests/test_move
+tests/test_outline
 tests/test_rewriter
 
 # Nim build artifacts
