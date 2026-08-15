@@ -8,6 +8,14 @@ tools/inspect_tool
 tools/move_tool
 tools/rename_tool
 
+# Compiled test binaries (extensionless, next to tests/*.nim)
+tests/test_ast_utils
+tests/test_cli
+tests/test_extract
+tests/test_inspect
+tests/test_move
+tests/test_rewriter
+
 # Nim build artifacts
 nimcache/
 *.exe
