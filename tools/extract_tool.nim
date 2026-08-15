@@ -55,6 +55,7 @@ proc findSymbol*(filePath, symbol: string, withBody = false): seq[Extracted] =
       body: if withBody: extractLineRange(source, lo, hi) else: "")
 
 proc toJson*(e: Extracted, filePath: string): JsonNode =
+  ## Machine-readable form. `body` is present only when it was requested.
   result = %*{
     "name": e.name, "kind": e.kind, "exported": e.exported,
     "file": filePath, "line": e.line, "endLine": e.endLine,
@@ -77,6 +78,8 @@ proc render(e: Extracted, filePath: string, withBody: bool): string =
     result &= "\n  --body to fetch source\n"
 
 proc main*(args: seq[string]): int =
+  ## CLI entry. Returns an exit code rather than quitting, so the umbrella
+  ## dispatcher stays in control of the process.
   var p = initOptParser(args)
   var targetFile, symbol = ""
   var withBody, asJson, helpRequested = false

@@ -16,6 +16,8 @@ type
     line*, cc*: int
 
 proc findUndocumented*(filePath: string, includePrivate = false): seq[UndocRoutine] =
+  ## Routines in `filePath` with no doc comment. Exported only unless
+  ## `includePrivate`. Returns an empty seq when the file cannot be parsed.
   let parsed = parseNimFile(filePath)
   if parsed.ast == nil: return @[]
   for n in collectRoutines(parsed.ast):
@@ -27,6 +29,8 @@ proc findUndocumented*(filePath: string, includePrivate = false): seq[UndocRouti
       line: n.info.line.int, cc: calcCyclomaticComplexity(n))
 
 proc main*(args: seq[string]): int =
+  ## CLI entry. Returns an exit code rather than quitting, so the umbrella
+  ## dispatcher stays in control of the process.
   var p = initOptParser(args)
   var files: seq[string] = @[]
   var includePrivate, asJson, helpRequested = false

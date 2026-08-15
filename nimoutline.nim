@@ -1,107 +1,22 @@
-import compiler / [ast, parser, idents, options, renderer, lineinfos]
+## nimoutline: one-line types and routine signatures for a whole file.
+##
+## Reads a Nim file and prints every type definition and routine signature with
+## its line number — the fast way to see a file's shape without reading it.
+##
+## Uses the shared walkers in shared/ast_utils, so it agrees with `extract` and
+## `inspect` about which routines exist. It previously carried its own copies of
+## the render helpers and its own traversal, which had drifted: the copies were
+## missing nkVarTy handling and had unguarded n[1]/n[2] indexing, and the walker
+## stopped at every routine so nested procs were invisible.
+
+import compiler/[ast]
 import std/[strutils, parseopt, os]
+import shared/[compiler_env, ast_utils]
 
 type
   OutlineItem = object
     line: int
     content: string
-
-proc hasSons(n: PNode): bool =
-  n != nil and n.kind notin {nkCharLit..nkUInt64Lit, nkFloatLit..nkFloat128Lit, nkStrLit..nkTripleStrLit, nkSym, nkIdent, nkEmpty}
-
-proc renderTypeNode(n: PNode): string =
-  if n == nil: return ""
-  case n.kind
-  of nkIdent:
-    return n.ident.s
-  of nkSym:
-    return n.sym.name.s
-  of nkPostfix:
-    if n.len >= 2:
-      return renderTypeNode(n[1]) & n[0].ident.s
-    else:
-      return renderTree(n)
-  of nkPragmaExpr:
-    if n.len >= 2:
-      return renderTypeNode(n[0]) & " " & renderTree(n[1])
-    else:
-      return renderTree(n)
-  of nkDistinctTy:
-    return if n.len > 0: "distinct " & renderTypeNode(n[0]) else: "distinct"
-  of nkRefTy:
-    return if n.len > 0: "ref " & renderTypeNode(n[0]) else: "ref"
-  of nkPtrTy:
-    return if n.len > 0: "ptr " & renderTypeNode(n[0]) else: "ptr"
-  of nkBracketExpr:
-    var res = renderTypeNode(n[0]) & "["
-    for i in 1 ..< n.len:
-      if i > 1: res &= ", "
-      res &= renderTypeNode(n[i])
-    res &= "]"
-    return res
-  of nkObjectTy:
-    var res = "object"
-    if n[1].kind != nkEmpty:
-      res &= " " & renderTree(n[1])
-    if n[2].kind != nkEmpty:
-      res &= " { " & renderTypeNode(n[2]) & " }"
-    return res
-  of nkRecList:
-    var fields: seq[string] = @[]
-    for child in n:
-      fields.add(renderTypeNode(child))
-    return fields.join(", ")
-  of nkIdentDefs:
-    if n.len >= 3:
-      var names: seq[string] = @[]
-      for i in 0 .. n.len - 3:
-        names.add(renderTree(n[i]))
-      let typStr = renderTypeNode(n[n.len - 2])
-      let defVal = n[n.len - 1]
-      var res = names.join(", ") & ": " & typStr
-      if defVal.kind != nkEmpty:
-        res &= " = " & renderTree(defVal)
-      return res
-    else:
-      return renderTree(n)
-  of nkEnumTy:
-    var vals: seq[string] = @[]
-    for i in 1 ..< n.len:
-      vals.add(renderTree(n[i]))
-    return "enum { " & vals.join(", ") & " }"
-  of nkTupleTy:
-    var fields: seq[string] = @[]
-    for child in n:
-      fields.add(renderTypeNode(child))
-    return "tuple { " & fields.join(", ") & " }"
-  of nkProcTy:
-    var res = "proc"
-    if n[0].kind != nkEmpty:
-      res &= renderTree(n[0])
-    if n[1].kind != nkEmpty:
-      res &= " " & renderTree(n[1])
-    return res
-  of nkRecCase:
-    var res = "case " & renderTypeNode(n[0])
-    for i in 1 ..< n.len:
-      let branch = n[i]
-      if branch.kind == nkOfBranch:
-        var vals: seq[string] = @[]
-        for j in 0 .. branch.len - 2:
-          vals.add(renderTree(branch[j]))
-        res &= " of " & vals.join(", ") & ": (" & renderTypeNode(branch[branch.len - 1]) & ")"
-      elif branch.kind == nkElse:
-        res &= " else: (" & renderTypeNode(branch[0]) & ")"
-    return res
-  else:
-    return renderTree(n).replace("\n", " ").replace("  ", " ").strip()
-
-proc renderTypeDefConcise(n: PNode): string =
-  assert n.kind == nkTypeDef
-  let nameStr = renderTree(n[0])
-  let genericsStr = if n[1].kind != nkEmpty: renderTree(n[1]) else: ""
-  let bodyStr = renderTypeNode(n[2])
-  result = "type " & nameStr & genericsStr & " = " & bodyStr
 
 proc main() =
   var p = initOptParser()
@@ -148,31 +63,10 @@ Options:
     stderr.writeLine "Error: File does not exist: " & inputFile
     quit(1)
 
-  let content = try:
-    readFile(inputFile)
-  except CatchableError as e:
-    stderr.writeLine "Error: Could not read file: " & e.msg
-    quit(1)
-
-  let cache = newIdentCache()
-  let config = newConfigRef()
-
-  # Set compiler settings to prevent exit and capture messages
-  config.ideCmd = ideSug
-  config.errorMax = 1000
-  config.writelnHook = proc(output: string) {.closure, gcsafe.} = discard
-
-  var errors: seq[string] = @[]
-  config.structuredErrorHook = proc(conf: ConfigRef; info: TLineInfo; msg: string; severity: Severity) {.closure, gcsafe.} =
-    {.cast(gcsafe).}:
-      if severity == Severity.Error:
-        errors.add("Line " & $info.line & ", col " & $info.col & ": " & msg)
-
-  let root = parseString(content, cache, config, inputFile)
-
-  if errors.len > 0:
+  let parsed = parseNimFile(inputFile)
+  if parsed.ast == nil or parsed.errors.len > 0:
     stderr.writeLine "Error: Syntax errors in " & inputFile & ":"
-    for err in errors:
+    for err in parsed.errors:
       stderr.writeLine "  " & err
     quit(1)
 
@@ -180,17 +74,12 @@ Options:
     types: seq[OutlineItem] = @[]
     routines: seq[OutlineItem] = @[]
 
-  proc walk(n: PNode) =
-    if n == nil: return
-    if n.kind == nkTypeDef:
-      types.add OutlineItem(line: n.info.line.int, content: renderTypeDefConcise(n))
-    elif n.kind in routineDefs:
-      routines.add OutlineItem(line: n.info.line.int, content: renderTree(n, {renderNoBody, renderNoComments}))
-    elif hasSons(n):
-      for i in 0 ..< n.len:
-        walk(n[i])
-
-  walk(root)
+  # Shared walkers: these recurse unconditionally, so routines nested inside
+  # other routines appear here exactly as they do in `extract` and `inspect`.
+  for n in collectTypeDefs(parsed.ast):
+    types.add OutlineItem(line: n.info.line.int, content: renderTypeDefConcise(n))
+  for n in collectRoutines(parsed.ast):
+    routines.add OutlineItem(line: n.info.line.int, content: renderRoutineSignature(n))
 
   # Generate outline text
   var outputLines: seq[string] = @[]
