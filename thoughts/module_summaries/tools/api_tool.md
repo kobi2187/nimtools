@@ -6,11 +6,11 @@ Answer "what can I call from outside this module" without reading the module.
 an agent otherwise resolves by reading a whole file.
 
 ## Public interface
-- `ApiSymbol*` — object: `name, kind, sig: string`, `line: int`
+- `ApiSymbol*` — object: `name, kind, sig: string`, `exported: bool`, `line: int`
 - `ModuleSurface*` — object: `file*`, `symbols*: seq[ApiSymbol]`,
   `reExports*: seq[string]`, `privateCount*: int`
-- `surfaceOf*(filePath: string): ModuleSurface` — one module
-- `surfaceOfPaths*(paths: seq[string]): seq[ModuleSurface]` — files and/or dirs
+- `surfaceOf*(filePath: string, includePrivate = false): ModuleSurface` — one module
+- `surfaceOfPaths*(paths: seq[string], includePrivate = false)` — files and/or dirs
 - `main*(args: seq[string]): int` — CLI entry
 
 ## Usage pattern
@@ -39,8 +39,14 @@ This tool has no such weakness: an export marker is `*` in the parse tree and
 nothing else, so the answer cannot be silently incomplete.
 
 ## Design notes
-- Private symbols are never listed, only counted — the reader knows something is
-  hidden without paying tokens for it.
+- By default private symbols are never listed, only counted — the reader knows
+  something is hidden without paying tokens for it.
+- `--all` / `includePrivate` lists them too, marked `-` and with `exported =
+  false`. Needed for executables, which export nothing and otherwise show an
+  empty surface — the gap found dogfooding `cyc.nim`.
+- Locals inside a routine body are *not* module symbols: `collectSections` stops
+  at routine definitions, so a proc's `var`/`let` bindings are neither listed
+  nor counted.
 - `const` shows its value (the value *is* the contract); `let`/`var` do not,
   since an initial value is mutable state rather than part of the interface.
 - Exported types are rendered as declared, so an object's private fields appear

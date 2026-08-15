@@ -1,6 +1,7 @@
 import compiler/[ast]
 import std/[os, strutils, algorithm, parseopt]
-import ../shared/[compiler_env, ast_utils, source_rewriter, path_resolver]
+import ../shared/[compiler_env, ast_utils, source_rewriter, path_resolver,
+                  scope_rename, exit_codes]
 import import_tool
 
 type
@@ -62,6 +63,98 @@ proc findLeftBehindDeps*(root: PNode, moved: seq[FoundSymbol]): seq[string] =
     if name in used and name notin result:
       result.add name
 
+proc stripBlankLines(s: string): string =
+  ## Removes leading and trailing blank lines left by a line-range deletion,
+  ## without touching the indentation of the remaining first/last code lines.
+  let eol = detectLineEnding(s)
+  var lines = s.splitLines()
+  while lines.len > 0 and lines[0].strip().len == 0: lines.delete(0)
+  while lines.len > 0 and lines[^1].strip().len == 0: lines.delete(lines.high)
+  lines.join(eol)
+
+proc deleteSymbols*(filePath: string, symbolNames: seq[string],
+                    force = false): MoveResult =
+  ## Removes the named definitions from `filePath`, like `moveSymbols` without
+  ## a destination. Refuses (mvRefused) when a deleted symbol is still
+  ## referenced elsewhere in the file, because that would emit undeclared
+  ## identifiers. `--force` overrides.
+  if not fileExists(filePath):
+    return MoveResult(status: mvError, message: "File not found: " & filePath)
+
+  let source = readFile(filePath)
+  let parsed = parseNimString(source, filePath)
+  if parsed.ast == nil:
+    return MoveResult(status: mvError, message: "Could not parse: " & filePath)
+
+  let found = findSymbolNodes(parsed.ast, symbolNames)
+  if found.len == 0:
+    return MoveResult(status: mvError,
+      message: "None of the specified symbols were found in " & filePath)
+
+  # Refuse before writing if any deleted symbol is still used in the file.
+  if not force:
+    var stillUsed: seq[string] = @[]
+    for sym in found:
+      for r in findReferences(source, filePath, sym.name):
+        if r.uses.len > 0:
+          stillUsed.add sym.name & " (" & $r.uses.len & " use(s))"
+    if stillUsed.len > 0:
+      return MoveResult(status: mvRefused, message:
+        "Refusing to delete: still referenced in " & filePath & ": " &
+        stillUsed.join(", ") & ". Pass --force to delete anyway.")
+
+  var sorted = found
+  sorted.sort(proc(a, b: FoundSymbol): int = cmp(b.startLine, a.startLine))
+  var updated = source
+  for sym in sorted:
+    updated = replaceLineRange(updated, sym.startLine, sym.endLine, "")
+
+  writeFile(filePath, stripBlankLines(updated))
+  return MoveResult(status: mvMoved,
+    message: "Deleted " & $found.len & " symbol(s) from " & filePath)
+
+proc deleteMain*(args: seq[string]): int =
+  ## CLI entry for `nimtools delete-symbol`.
+  var p = initOptParser(args)
+  var file = ""
+  var symbols: seq[string] = @[]
+  var force, helpRequested = false
+
+  while true:
+    p.next()
+    case p.kind
+    of cmdEnd: break
+    of cmdShortOption, cmdLongOption:
+      case p.key.toLowerAscii
+      of "h", "help": helpRequested = true
+      of "f", "force": force = true
+      else:
+        stderr.writeLine "Unknown option: --", p.key
+        return ExitError
+    of cmdArgument:
+      if file == "": file = p.key
+      else: symbols.add p.key
+
+  if helpRequested or file == "" or symbols.len == 0:
+    echo """\
+nimtools delete-symbol: Remove a proc/type definition from a file.
+
+Usage:
+  delete-symbol [--force] <file.nim> <symbol1> [symbol2 ...]
+
+Refuses (exit 2) when a deleted symbol is still referenced elsewhere in the
+file, since that would emit undeclared identifiers.
+
+  --force, -f   delete anyway, even if the file will not compile
+"""
+    return ExitOk
+
+  let r = deleteSymbols(file, symbols, force = force)
+  case r.status
+  of mvMoved:   echo r.message; ExitOk
+  of mvRefused: stderr.writeLine r.message; ExitRefused
+  of mvError:   stderr.writeLine "Error: ", r.message; ExitError
+
 proc moveSymbols*(sourceFile, destFile: string, symbolNames: seq[string],
                   force = false): MoveResult =
   if not fileExists(sourceFile):
@@ -103,7 +196,7 @@ proc moveSymbols*(sourceFile, destFile: string, symbolNames: seq[string],
     echo "Extracted '", sym.name, "' (lines ", sym.startLine, "..", sym.endLine, ")"
 
   # Write back updated source
-  writeFile(sourceFile, updatedSource.strip(trailing = true) & "\n")
+  writeFile(sourceFile, stripBlankLines(updatedSource) & "\n")
   echo "Removed extracted symbols from ", sourceFile
 
   # Reverse extractedBlocks back to original order
@@ -119,9 +212,20 @@ proc moveSymbols*(sourceFile, destFile: string, symbolNames: seq[string],
     writeFile(destFile, appendedCode)
     echo "Created destination file ", destFile, " with ", extractedBlocks.len, " symbol(s)"
 
-  # Auto-wire import in source file
-  let relImport = resolveProjectImportPath(destFile, sourceFile)
-  discard addImportToFile(sourceFile, relImport)
+  # Wire the import in the source file ONLY when code that stayed behind still
+  # references a moved symbol. Adding it unconditionally leaves a dead import
+  # (and an `unused-imports` warning) when the move took the module's only proc.
+  var movedNames: seq[string] = @[]
+  for s in foundSymbols: movedNames.add s.name
+  var remainingIdents: seq[string] = @[]
+  let remainingAst = parseNimString(stripBlankLines(updatedSource), sourceFile).ast
+  if remainingAst != nil: collectIdents(remainingAst, remainingIdents)
+  var needsImport = false
+  for nm in movedNames:
+    if nm in remainingIdents: needsImport = true
+  if needsImport:
+    let relImport = resolveProjectImportPath(destFile, sourceFile)
+    discard addImportToFile(sourceFile, relImport)
   return MoveResult(status: mvMoved,
     message: "Moved " & $foundSymbols.len & " symbol(s) to " & destFile)
 

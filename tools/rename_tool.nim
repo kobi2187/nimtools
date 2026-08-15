@@ -1,5 +1,6 @@
 import std/[os, strutils, parseopt, osproc, streams]
 import ../shared/[source_rewriter, compiler_env, exit_codes, scope_rename]
+import references_tool
 export scope_rename
 
 proc renameScopedInFile*(filePath, oldName, newName: string;
@@ -46,6 +47,47 @@ proc renameInFile*(filePath, oldName, newName: string): RenameResult =
   else:
     RenameResult(status: rnNoOp,
       message: "No occurrences of '" & oldName & "' in " & filePath & " (nothing to do)")
+
+proc renameProjectScoped*(entryFile, oldName, newName: string;
+                          line, col: int): RenameScopedResult =
+  ## Cross-file, scope-aware rename of an exported symbol. Rewrites the
+  ## definition and its uses in the defining file via `renameScoped`, then
+  ## rewrites unbound uses in every module that imports it. Refuses (srConflict)
+  ## when another local module also exports the name, because a use in an
+  ## importer would then be ambiguous and the parser cannot tell which module it
+  ## refers to.
+  if not fileExists(entryFile):
+    return RenameScopedResult(status: srNotFound,
+      message: "File not found: " & entryFile)
+
+  if not symbolIsExported(entryFile, oldName):
+    return RenameScopedResult(status: srNotFound, message:
+      "'" & oldName & "' is not an exported symbol in " & entryFile &
+      "; a cross-file rename needs an exported definition")
+
+  for f in projectFiles(entryFile.parentDir):
+    if f == entryFile: continue
+    if symbolIsExported(f, oldName):
+      return RenameScopedResult(status: srConflict, message:
+        "Refusing cross-file rename: '" & oldName & "' is also exported by " &
+        f & ", so a use in an importer is ambiguous")
+
+  let source = readFile(entryFile)
+  let local = renameScoped(source, entryFile, oldName, newName, line, col)
+  if local.status != srRenamed: return local
+  writeFile(entryFile, local.source)
+
+  var filesChanged = 1
+  for f in importersOf(entryFile):
+    let src = readFile(f)
+    let updated = renameUnboundUses(src, f, oldName, newName)
+    if updated != src:
+      writeFile(f, updated)
+      filesChanged.inc
+
+  RenameScopedResult(status: srRenamed, occurrences: filesChanged, message:
+    "Renamed '" & oldName & "' -> '" & newName & "' across " & $filesChanged &
+    " file(s)")
 
 proc renameSemantic*(projectFile, targetFile: string, line, col: int,
                      newName: string): RenameResult =

@@ -11,7 +11,11 @@ Refuses when the move would produce code that does not compile.
   names the moved code references that would stay in the source file
 - `moveSymbols*(sourceFile, destFile: string, symbolNames: seq[string],
    force = false): MoveResult`
-- `main*()` — CLI entry
+- `deleteSymbols*(filePath: string, symbolNames: seq[string],
+   force = false): MoveResult` — move without a destination; refuses (mvRefused)
+  when a deleted symbol is still referenced in the file
+- `deleteMain*(args: seq[string]): int` — CLI entry for `nimtools delete-symbol`
+- `main*()` — CLI entry for `nimtools move-symbol`
 
 ## Usage pattern
 ```nim
@@ -34,10 +38,17 @@ fixture. For the AI-agent audience this is the worst failure mode in the
 toolkit, since an agent cannot eyeball the diff.
 
 ## Design notes
-- Refusal happens **before any file is written**, so a declined move leaves the
-  tree untouched.
+- Refusal happens **before any file is written**, so a declined move/delete
+  leaves the tree untouched.
 - Analysis is parser-level, so it is conservative in the safe direction: it may
   refuse a symbol that was actually movable (a name that merely *looks* used),
   but it will not emit undeclared references.
 - Refusal is a distinct exit code (2), not an error — the tool understood the
   request and declined.
+- The source→destination import is wired only when code that stayed behind still
+  references a moved symbol. Adding it unconditionally left a dead import when
+  the move took the module's only proc (found dogfooding: moving `greet` out of
+  a one-proc module left an unused `import ./model`).
+- `deleteSymbols` reuses the same find/refuse machinery; its refusal is the
+  mirror image of `findLeftBehindDeps` — staying code referencing the deleted
+  symbol, checked with the scope model (`findReferences`).

@@ -81,3 +81,93 @@ proc f() =
     check "## target in a doc comment" in got
     check "\"target in a string\"" in got
     check "# target in a comment" in got
+
+suite "find-references":
+  test "lists a binding's declaration and every use":
+    const Src = """
+proc greet(name: string): string =
+  "Hello, " & name
+
+proc main() =
+  echo greet("a")
+  echo greet("b")
+"""
+    let refs = findReferences(Src, "t.nim", "greet")
+    check refs.len == 1
+    check refs[0].declaredLine == 1
+    check refs[0].declaredCol == 5
+    check refs[0].uses.len == 2
+    check refs[0].uses[0].line == 5
+    check refs[0].uses[1].line == 6
+    check "greet(\"a\")" in refs[0].uses[0].text
+
+  test "disambiguates shadowed bindings by position":
+    const Src = """
+proc outer() =
+  var x = 1
+  echo x
+proc other() =
+  var x = 2
+  echo x
+"""
+    let one = findReferences(Src, "t.nim", "x", line = 2, col = 6)
+    check one.len == 1
+    check one[0].declaredLine == 2
+    check one[0].uses.len == 1
+    check one[0].uses[0].line == 3
+
+  test "returns every binding when no position is given":
+    const Src = """
+proc outer() =
+  var x = 1
+  echo x
+proc other() =
+  var x = 2
+  echo x
+"""
+    check findReferences(Src, "t.nim", "x").len == 2
+
+  test "an unused binding reports zero uses, not a miss":
+    const Src = """
+proc unused(): int = 1
+"""
+    let refs = findReferences(Src, "t.nim", "unused")
+    check refs.len == 1
+    check refs[0].uses.len == 0
+
+  test "an unknown name returns nothing":
+    check findReferences("proc f() =\n  discard\n", "t.nim", "nosuch").len == 0
+
+suite "find-unbound-uses":
+  test "reports an imported name's uses":
+    const Src = """
+import util
+
+proc f() =
+  echo sanitize("x")
+  echo sanitize("y")
+"""
+    let uses = findUnboundUses(Src, "t.nim", "sanitize")
+    check uses.len == 2
+    check uses[0].line == 4
+    check uses[1].line == 5
+
+  test "a local binding shadows the import, so it is not unbound":
+    const Src = """
+import util
+var sanitize = 5
+proc f() =
+  echo sanitize
+"""
+    check findUnboundUses(Src, "t.nim", "sanitize").len == 0
+
+  test "a from-import and a label are not uses":
+    const Src = """
+from util import sanitize
+proc f() =
+  let p = Person(name: "x")
+  discard g(flag: true)
+"""
+    check findUnboundUses(Src, "t.nim", "sanitize").len == 0
+    check findUnboundUses(Src, "t.nim", "name").len == 0
+    check findUnboundUses(Src, "t.nim", "flag").len == 0

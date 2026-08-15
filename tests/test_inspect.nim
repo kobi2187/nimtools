@@ -35,3 +35,8 @@ proc undocumented(a: int): int =
     let undoc = rs.filterIt(it["name"].getStr == "undocumented")[0]
     check outer["doc"].getStr.len > 0
     check undoc["doc"].getStr.len == 0
+
+  test "reports the 0-based declaration column for --at round-trips":
+    let rs = inspectFile(Fixture)["routines"].getElems
+    let outer = rs.filterIt(it["name"].getStr == "outer")[0]
+    check outer["col"].getInt == 5

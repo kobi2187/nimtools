@@ -50,6 +50,11 @@ suite "extract":
     check r.len == 1
     check r[0].kind == "type"
 
+  test "reports the 0-based declaration column for --at round-trips":
+    let r = findSymbol(F, "documented")
+    check r.len == 1
+    check r[0].col == 5
+
   test "unknown symbol returns nothing":
     check findSymbol(F, "nosuch").len == 0
 

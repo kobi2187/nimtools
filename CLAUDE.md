@@ -43,16 +43,19 @@ nimtools.nim        Umbrella CLI — dispatch() routes subcommands, returns exit
 ├── tools/          Each module is BOTH a library (exports procs) and a binary (isMainModule)
 │   ├── find_import_tool.nim   symbol search across stdlib/nimble/project -> import path
 │   ├── import_tool.nim        add/remove imports; owns extractExistingImports
-│   ├── move_tool.nim          move procs/types; refuses unsafe moves
+│   ├── move_tool.nim          move procs/types; delete-symbol; refuses unsafe moves
 │   ├── rename_tool.nim        token-level rename (semantic path refuses; not built yet)
+│   ├── references_tool.nim    every use of a symbol (line:col), on the scope model
 │   ├── inspect_tool.nim       JSON model of a file
 │   ├── extract_tool.nim       one symbol: signature first, --body opt-in
+│   ├── api_tool.nim           api-surface / api-diff
 │   └── doc_tool.nim           routines missing doc comments
 └── shared/
     ├── compiler_env.nim       parser setup with silenced hooks + structured error capture
     ├── ast_utils.nim          walkers, names, render, doc comments, complexity
     ├── source_rewriter.nim    line-range edit, export marker, lexer-guided rename
-    ├── scope_rename.nim       scope-stack walker; renames one binding, not a name
+    ├── scope_rename.nim       scope-stack walker; renames one binding, not a name;
+    │                          also findReferences (uses with line:col)
     ├── path_resolver.nim      file path -> idiomatic import path
     └── exit_codes.nim         0 ok / 1 error / 2 refused
 
@@ -153,13 +156,36 @@ Writing a module summary using only the tools — no file reads — surfaced the
 3. **`raises` reports UNDECLARED for nearly everything** on codebases that don't
    annotate effects — correct, but low signal. Worth pairing with `nim check`'s
    inferred effects if that ever matters.
-4. **`api-surface` is blind to executables.** A CLI module exports nothing, so
-   the surface is empty and the tool reports only a private count — on `cyc.nim`,
-   `0 exported, 33 private (hidden)`, which tells an agent nothing about a file
-   whose entire content is those 33 procs. Correct for a library, useless for a
-   program. Wants an `--all` flag (private symbols included) or an automatic
-   fallback when nothing is exported. Found by dogfooding 2026-08-15 while
-   trying to learn `cyc.nim` without reading it; `outline` was the workaround.
+4. ~~`api-surface` is blind to executables~~ — **fixed**: `--all` lists private
+   symbols (marked `-`, `exported = false`), including private const/let/var.
+   `collectSections` no longer descends into routine bodies, so a proc's local
+   `var`/`let` is neither listed nor counted (previously inflated `cyc.nim` to
+   "33 private" when only 13 were module symbols).
+
+## Known gaps (second dogfooding pass, 2026-08-15)
+
+Driving a full refactor loop (create → rename → move → find → delete) in
+`playground/` with the tools alone surfaced a different layer of gaps — the
+write side, where an agent does most of its work. Two are now closed, two stand.
+
+5. ~~`references` is single-file~~ — **fixed**: `references --project` follows the
+   import graph and reports an imported symbol's *unbound* uses in every module
+   that imports its defining module. Advisory: qualified access (`util.fn`) is
+   not reported, and the parser cannot tell two same-named exporters apart.
+6. ~~No cross-file rename~~ — **fixed**: `rename-symbol --project --at:LINE:COL`
+   renames the definition and its uses in the defining file, then rewrites
+   unbound uses in each importer. Refuses (exit 2) when another local module
+   also exports the name (ambiguous), and leaves a shadowing local alone.
+7. **No edit-symbol / change-signature — and deliberately so.** "Replace a
+   function body" is already deterministic for the agent: `extract --body`
+   returns the exact source with `line:col` bounds, and the model edits that
+   exact text. A dedicated tool adds no safety. "Change signature" (add/remove
+   a parameter) is the unsafe case — UFCS makes call sites ambiguous at parser
+   level — and is deferred to a semantic pass, not faked.
+8. **`delete-symbol` is single-file** — it refuses only on in-file references,
+   not project-wide. `references --project` now supplies the blast radius an
+   agent can check first; a `delete-symbol --project` guard is a natural next
+   step but not yet written.
 
 ## Self-audit
 

@@ -24,6 +24,7 @@ type
     kind*: string     ## proc/func/template/macro/iterator/converter/method/type/const/let/var
     sig*: string      ## one-line signature or rendered type
     doc*: string      ## the symbol's own doc comment, "" when undocumented
+    exported*: bool   ## false only when includePrivate surfaced it
     line*: int
 
   ModuleSurface* = object
@@ -31,7 +32,7 @@ type
     moduleDoc*: string       ## the module's header `##` block — its rationale
     symbols*: seq[ApiSymbol]
     reExports*: seq[string]  ## modules re-exported via `export`
-    privateCount*: int       ## symbols deliberately not shown
+    privateCount*: int       ## private symbols; in `symbols` only under includePrivate
 
 type
   SurfaceChange* = object
@@ -74,12 +75,15 @@ proc plainName(n: PNode): string =
     if n.len >= 1: plainName(n[0]) else: ""
   else: ""
 
-proc collectSections(root: PNode): tuple[symbols: seq[ApiSymbol],
-                                         reExports: seq[string],
-                                         privateCount: int] =
+proc collectSections(root: PNode,
+                     includePrivate = false): tuple[symbols: seq[ApiSymbol],
+                                                    reExports: seq[string],
+                                                    privateCount: int] =
   ## const/let/var sections plus `export` statements. Each nkIdentDefs/
   ## nkConstDef may declare several names, and each name carries its own export
   ## marker, so they are checked individually rather than per-section.
+  ## Routine bodies are not descended into: a `var`/`let` there is a local
+  ## binding, not a module-level symbol.
   var symbols: seq[ApiSymbol] = @[]
   var reExports: seq[string] = @[]
   var privateCount = 0
@@ -98,8 +102,9 @@ proc collectSections(root: PNode): tuple[symbols: seq[ApiSymbol],
           let nameNode = defs[i]
           let nm = plainName(nameNode)
           if nm.len == 0: continue
-          if isExportedName(nameNode):
-            var sig = kindStr & " " & nm & "*"
+          let exp = isExportedName(nameNode)
+          if exp or includePrivate:
+            var sig = kindStr & " " & nm & (if exp: "*" else: "")
             if defs.len >= 2 and defs[^2].kind != nkEmpty:
               sig &= ": " & renderTypeNode(defs[^2])
             # For a const the value IS the interesting part — a caller needs to
@@ -108,23 +113,27 @@ proc collectSections(root: PNode): tuple[symbols: seq[ApiSymbol],
             if n.kind == nkConstSection and defs.len >= 1 and
                defs[^1].kind != nkEmpty:
               sig &= " = " & renderTypeNode(defs[^1])
-            symbols.add ApiSymbol(name: nm, kind: kindStr,
+            symbols.add ApiSymbol(name: nm, kind: kindStr, exported: exp,
               sig: sig, line: nameNode.info.line.int)
-          else:
-            privateCount.inc
+          if not exp: privateCount.inc
     elif n.kind == nkExportStmt:
       for c in n:
         let nm = plainName(c)
         if nm.len > 0 and nm notin reExports:
           reExports.add nm
-    elif hasSons(n):
+    elif n.kind notin RoutineKinds and hasSons(n):
       for c in n: walk(c)
 
   walk(root)
   (symbols, reExports, privateCount)
 
-proc surfaceOf*(filePath: string): ModuleSurface =
+proc surfaceOf*(filePath: string, includePrivate = false): ModuleSurface =
   ## The exported surface of one module.
+  ##
+  ## `includePrivate` also lists private symbols, marking each with `exported`.
+  ## An executable exports nothing, so without it a CLI module reports an empty
+  ## surface and a private count — correct, but useless for the file whose whole
+  ## content is those private procs.
   result = ModuleSurface(file: filePath, symbols: @[], reExports: @[],
                          privateCount: 0)
   let parsed = parseNimFile(filePath)
@@ -144,26 +153,29 @@ proc surfaceOf*(filePath: string): ModuleSurface =
     result.moduleDoc = parsed.ast.comment.strip()
 
   for n in collectTypeDefs(parsed.ast):
-    if isExported(n):
+    let exp = isExported(n)
+    if exp or includePrivate:
       result.symbols.add ApiSymbol(name: typeDefName(n), kind: "type",
-        sig: renderTypeDefConcise(n), doc: docComment(n), line: n.info.line.int)
-    else:
-      result.privateCount.inc
+        sig: renderTypeDefConcise(n), doc: docComment(n), exported: exp,
+        line: n.info.line.int)
+    if not exp: result.privateCount.inc
 
   for n in collectRoutines(parsed.ast):
-    if isExported(n):
+    let exp = isExported(n)
+    if exp or includePrivate:
       result.symbols.add ApiSymbol(name: routineName(n), kind: routineKindName(n),
-        sig: renderRoutineSignature(n), doc: docComment(n), line: n.info.line.int)
-    else:
-      result.privateCount.inc
+        sig: renderRoutineSignature(n), doc: docComment(n), exported: exp,
+        line: n.info.line.int)
+    if not exp: result.privateCount.inc
 
-  let sections = collectSections(parsed.ast)
+  let sections = collectSections(parsed.ast, includePrivate)
   result.symbols.add sections.symbols
   result.reExports = sections.reExports
   result.privateCount += sections.privateCount
   result.symbols.sort(proc(a, b: ApiSymbol): int = cmp(a.line, b.line))
 
-proc surfaceOfPaths*(paths: seq[string]): seq[ModuleSurface] =
+proc surfaceOfPaths*(paths: seq[string],
+                     includePrivate = false): seq[ModuleSurface] =
   ## Surfaces for every .nim file in `paths`; directories are walked.
   var files: seq[string] = @[]
   for p in paths:
@@ -173,7 +185,7 @@ proc surfaceOfPaths*(paths: seq[string]): seq[ModuleSurface] =
     elif fileExists(p):
       files.add p
   files.sort()
-  for f in files: result.add surfaceOf(f)
+  for f in files: result.add surfaceOf(f, includePrivate)
 
 proc diffSurfaces*(before, after: ModuleSurface): SurfaceDiff =
   ## Compares two exported surfaces. Symbols are matched on name AND kind: a
@@ -235,13 +247,20 @@ proc render(s: ModuleSurface, withDocs = false): string =
   for r in s.reExports:
     result &= "  export " & r & "   (re-export)\n"
   for sym in s.symbols:
-    result &= "  " & sym.sig & "\n"
+    # A leading `-` marks a private symbol, which only appears under --all.
+    result &= (if sym.exported: "  " else: "  - ") & sym.sig & "\n"
     if withDocs and sym.doc.len > 0:
       # First line only: the summary is what a caller needs to choose a symbol;
       # `extract` gives the full doc when they have chosen one.
       result &= "      " & sym.doc.splitLines()[0] & "\n"
-  result &= "  " & $s.symbols.len & " exported"
-  if s.privateCount > 0:
+  var exportedShown = 0
+  for sym in s.symbols:
+    if sym.exported: exportedShown.inc
+  let privateShown = s.symbols.len - exportedShown
+  result &= "  " & $exportedShown & " exported"
+  if privateShown > 0:
+    result &= ", " & $privateShown & " private (shown)"
+  elif s.privateCount > 0:
     result &= ", " & $s.privateCount & " private (hidden)"
   result &= "\n"
 
@@ -367,7 +386,7 @@ proc main*(args: seq[string]): int =
   ## dispatcher stays in control of the process.
   var p = initOptParser(args)
   var paths: seq[string] = @[]
-  var asJson, helpRequested, withDocs = false
+  var asJson, helpRequested, withDocs, includePrivate = false
 
   while true:
     p.next()
@@ -378,6 +397,7 @@ proc main*(args: seq[string]): int =
       of "h", "help": helpRequested = true
       of "j", "json": asJson = true
       of "d", "docs": withDocs = true
+      of "a", "all": includePrivate = true
       else:
         stderr.writeLine "Unknown option: --", p.key
         return ExitError
@@ -388,13 +408,15 @@ proc main*(args: seq[string]): int =
 nimtools api-surface: What a module exports, without reading it.
 
 Usage:
-  api-surface [--docs] [--json] FILE|DIR...
+  api-surface [--all] [--docs] [--json] FILE|DIR...
 
 Lists exported routines, types, consts, lets, vars and re-exports, grouped by
 module. Private symbols are never listed — only counted. Exported types are
 rendered as declared, so their private fields do appear in the type line.
 
 Options:
+  -a, --all    include private symbols, marked `-`. Needed for executables,
+               which export nothing and otherwise show an empty surface.
   -d, --docs   include the module's header doc and each symbol's summary line
   -j, --json   machine-readable output
 """
@@ -405,7 +427,7 @@ Options:
       stderr.writeLine "Error: No such file or directory: ", path
       return ExitError
 
-  let surfaces = surfaceOfPaths(paths)
+  let surfaces = surfaceOfPaths(paths, includePrivate)
   if asJson:
     var arr = newJArray()
     for s in surfaces: arr.add s.toJson()

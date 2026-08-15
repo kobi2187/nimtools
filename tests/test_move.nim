@@ -38,3 +38,52 @@ suite "move-symbol safety":
     let (src, dest) = setupFiles()
     let r = moveSymbols(src, dest, @["usesPerson"], force = true)
     check r.status == mvMoved
+
+  test "does not add a back-import when nothing staying references the moved symbol":
+    let (src, dest) = setupFiles()
+    let r = moveSymbols(src, dest, @["standalone"])
+    check r.status == mvMoved
+    check "import" notin readFile(src)
+
+  test "adds a back-import when a staying symbol references the moved one":
+    let (src, dest) = setupFiles()
+    writeFile(src, """
+proc a(x: int): int = x
+proc b(x: int): int = a(x)
+""")
+    let r = moveSymbols(src, dest, @["a"])
+    check r.status == mvMoved
+    check "proc a" notin readFile(src)   # a's definition gone
+    check "b" in readFile(src)           # b stays, calls a
+    check "import" in readFile(src)      # back-import wired so b still compiles
+
+suite "delete-symbol":
+  test "removes a self-contained symbol's definition":
+    let (src, _) = setupFiles()
+    let r = deleteSymbols(src, @["standalone"])
+    check r.status == mvMoved
+    check "standalone" notin readFile(src)
+    check "usesPerson" in readFile(src)
+
+  test "refuses to delete a symbol that is still referenced":
+    let (src, _) = setupFiles()
+    writeFile(src, """
+proc helper(x: int): int = x
+proc main() =
+  echo helper(1)
+""")
+    let r = deleteSymbols(src, @["helper"])
+    check r.status == mvRefused
+    check "helper" in readFile(src)
+
+  test "force overrides the delete refusal":
+    let (src, _) = setupFiles()
+    writeFile(src, """
+proc helper(x: int): int = x
+proc main() =
+  echo helper(1)
+""")
+    let r = deleteSymbols(src, @["helper"], force = true)
+    check r.status == mvMoved
+    check "proc helper" notin readFile(src)   # definition gone
+    check "main" in readFile(src)             # call site left (broken, as forced)

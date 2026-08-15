@@ -134,3 +134,52 @@ proc documented*(): int =
 """)
     let s = surfaceOf(Dir / "g.nim").symbols[0]
     check s.doc == "What it does."
+
+suite "api-surface: executables":
+  setup: setupFiles()
+
+  test "includePrivate reveals a program's internals":
+    writeFile(Dir / "cli.nim", """
+proc helper(x: int): int = x
+proc main() =
+  discard helper(1)
+when isMainModule: main()
+""")
+    check surfaceOf(Dir / "cli.nim").symbols.len == 0
+    let all = surfaceOf(Dir / "cli.nim", includePrivate = true)
+    check all.symbols.mapIt(it.name) == @["helper", "main"]
+
+  test "private symbols are marked as private":
+    writeFile(Dir / "cli.nim", "proc helper(x: int): int = x\n")
+    let all = surfaceOf(Dir / "cli.nim", includePrivate = true)
+    check not all.symbols[0].exported
+
+  test "exported symbols stay marked exported under includePrivate":
+    let all = surfaceOf(Dir / "m.nim", includePrivate = true)
+    check all.symbols.filterIt(it.name == "exportedProc")[0].exported
+
+  test "exported consts and lets are marked exported":
+    let s = surfaceOf(Dir / "m.nim")
+    check s.symbols.filterIt(it.name == "PublicConst")[0].exported
+    check s.symbols.filterIt(it.name == "publicLet")[0].exported
+
+  test "includePrivate reveals private const/let/var":
+    writeFile(Dir / "cli.nim", """
+const limit = 10
+let name = "x"
+var state = 0
+""")
+    let all = surfaceOf(Dir / "cli.nim", includePrivate = true)
+    check all.symbols.mapIt(it.name) == @["limit", "name", "state"]
+    check all.symbols.allIt(not it.exported)
+
+  test "locals inside a routine body are not module symbols":
+    writeFile(Dir / "cli.nim", """
+proc helper(x: int): int =
+  var local = x + 1
+  let tmp = local * 2
+  tmp
+""")
+    check surfaceOf(Dir / "cli.nim").privateCount == 1
+    let all = surfaceOf(Dir / "cli.nim", includePrivate = true)
+    check all.symbols.mapIt(it.name) == @["helper"]

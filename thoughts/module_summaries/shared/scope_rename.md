@@ -11,6 +11,19 @@ what makes renaming a local, a parameter, or a loop variable correct.
   text), `occurrences*: int`
 - `renameScoped*(source, filename, oldName, newName: string; line, col: int):
   RenameScopedResult` — `line` 1-based, `col` 0-based (compiler convention)
+- `Reference*` — object: `line*, col*: int`, `text*: string` (stripped source
+  line at the use)
+- `SymbolReferences*` — object: `name*: string`, `declaredLine*,
+  declaredCol*: int`, `uses*: seq[Reference]`
+- `findReferences*(source, filename, symbol: string; line = -1, col = -1):
+  seq[SymbolReferences]` — all bindings of `symbol`; with `line`/`col`, only the
+  one declared or used there
+- `findUnboundUses*(source, filename, symbol: string): seq[Reference]` — every
+  identifier named `symbol` that resolves to no local binding (imports,
+  builtins). The raw material for cross-file reference discovery.
+- `renameUnboundUses*(source, filename, oldName, newName: string): string` —
+  rewrites only the unbound uses of `oldName`; the cross-file half of a rename
+  (the defining file goes through `renameScoped`)
 
 ## Usage pattern
 ```nim
@@ -51,7 +64,11 @@ works on files that do not compile.
 
 ## Known limits
 - **One file, lexical scope only.** Cannot resolve overloads, follow a symbol
-  across modules, or reason about types. Renaming an exported symbol used
-  elsewhere still leaves the other files stale — that needs nimsuggest.
+  across modules, or reason about types. Cross-file work lives in `rename_tool`
+  (`rename-symbol --project`) and `references_tool` (`references --project`),
+  which layer an import graph over this module's unbound-use collection.
 - Refuses (`srConflict`) when the new name is already bound in the same scope,
   since the rename would silently change what surrounding code resolves to.
+- `findUnboundUses` is advisory: qualified access (`util.fn`) is not reported
+  (only the module side is walked), and an unbound use cannot be attributed to
+  one of two same-named exporters by the parser alone.

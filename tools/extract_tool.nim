@@ -20,7 +20,7 @@ type
     name*: string
     kind*: string       ## proc/func/type/...
     exported*: bool
-    line*, endLine*: int
+    line*, col*, endLine*: int
     sig*: string
     doc*: string
     cc*: int
@@ -38,9 +38,10 @@ proc findSymbol*(filePath, symbol: string, withBody = false): seq[Extracted] =
   for n in collectRoutines(parsed.ast):
     if routineName(n) != symbol: continue
     let (lo, hi) = nodeLineBounds(n)
+    let (dl, dc) = declarationPos(n)
     result.add Extracted(
       name: symbol, kind: routineKindName(n), exported: isExported(n),
-      line: n.info.line.int, endLine: hi,
+      line: dl, col: dc, endLine: hi,
       sig: renderRoutineSignature(n), doc: docComment(n),
       cc: calcCyclomaticComplexity(n),
       body: if withBody: extractLineRange(source, lo, hi) else: "")
@@ -48,9 +49,10 @@ proc findSymbol*(filePath, symbol: string, withBody = false): seq[Extracted] =
   for n in collectTypeDefs(parsed.ast):
     if typeDefName(n) != symbol: continue
     let (lo, hi) = nodeLineBounds(n)
+    let (dl, dc) = declarationPos(n)
     result.add Extracted(
       name: symbol, kind: "type", exported: isExported(n),
-      line: n.info.line.int, endLine: hi,
+      line: dl, col: dc, endLine: hi,
       sig: renderTypeDefConcise(n), doc: docComment(n), cc: 0,
       body: if withBody: extractLineRange(source, lo, hi) else: "")
 
@@ -58,7 +60,7 @@ proc toJson*(e: Extracted, filePath: string): JsonNode =
   ## Machine-readable form. `body` is present only when it was requested.
   result = %*{
     "name": e.name, "kind": e.kind, "exported": e.exported,
-    "file": filePath, "line": e.line, "endLine": e.endLine,
+    "file": filePath, "line": e.line, "col": e.col, "endLine": e.endLine,
     "sig": e.sig, "doc": e.doc, "cc": e.cc
   }
   if e.body.len > 0: result["body"] = %e.body
@@ -68,7 +70,7 @@ proc render(e: Extracted, filePath: string, withBody: bool): string =
   if e.doc.len > 0:
     for line in e.doc.splitLines(): result &= "  ## " & line & "\n"
   let span = e.endLine - e.line + 1
-  result &= "  " & filePath & ":" & $e.line & "-" & $e.endLine &
+  result &= "  " & filePath & ":" & $e.line & ":" & $e.col & "-" & $e.endLine &
             "  (" & $span & " ln"
   if e.cc > 0: result &= ", cc=" & $e.cc
   result &= ")\n"

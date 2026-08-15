@@ -38,6 +38,16 @@ proc typeDefName*(n: PNode): string =
   assert n.kind == nkTypeDef
   return routineName(n)
 
+proc declarationPos*(n: PNode): tuple[line, col: int] =
+  ## 1-based line and 0-based column of a definition's name, unwrapping `*` and
+  ## pragma wrappers. The column matches the compiler convention that
+  ## `rename-symbol --at:LINE:COL` consumes, so a query can feed a rename.
+  if n == nil or n.len == 0: return (0, 0)
+  var nameNode = n[0]
+  while nameNode.kind in {nkPostfix, nkPragmaExpr} and nameNode.len > 1:
+    nameNode = (if nameNode.kind == nkPostfix: nameNode[1] else: nameNode[0])
+  (nameNode.info.line.int, nameNode.info.col.int)
+
 proc nodeLineBounds*(n: PNode): tuple[startLine, endLine: int] =
   ## Computes the line span [startLine, endLine] of a node in the source file.
   if n == nil: return (0, 0)

@@ -32,6 +32,17 @@ type
     source*: string      ## rewritten text (only meaningful on srRenamed)
     occurrences*: int    ## declaration + uses rewritten
 
+  Reference* = object
+    line*: int
+    col*: int
+    text*: string        ## the stripped source line at this use
+
+  SymbolReferences* = object
+    name*: string
+    declaredLine*: int
+    declaredCol*: int
+    uses*: seq[Reference]
+
   Pos = tuple[line, col: int]
 
   Binding = ref object
@@ -82,11 +93,15 @@ proc declNode(n: PNode): PNode =
     if n.len >= 1: declNode(n[0]) else: nil
   else: nil
 
-proc collectBindings(root: PNode): seq[Binding] =
+proc collectBindings(root: PNode): tuple[bindings: seq[Binding],
+                                         unbound: seq[tuple[name: string, pos: Pos]]] =
   ## Walks the tree maintaining a scope stack, recording every binding with the
   ## uses that resolve to it. A use is an nkIdent that is not itself a
   ## declaration target and whose name resolves in the enclosing scope chain.
+  ## Uses that resolve to nothing (imports, builtins, typos) are returned as
+  ## `unbound` — the raw material for cross-file reference discovery.
   var all: seq[Binding] = @[]
+  var unboundUses: seq[tuple[name: string, pos: Pos]] = @[]
 
   proc declare(scope: Scope, nameNode: PNode) =
     let nm = identName(nameNode)
@@ -99,6 +114,7 @@ proc collectBindings(root: PNode): seq[Binding] =
   proc use(scope: Scope, n: PNode) =
     let b = scope.lookup(n.ident.s)
     if b != nil: b.uses.add pos(n)
+    else: unboundUses.add (n.ident.s, pos(n))
 
   proc walk(n: PNode, scope: Scope) {.gcsafe.}
 
@@ -149,7 +165,10 @@ proc collectBindings(root: PNode): seq[Binding] =
     of nkIdent:
       use(scope, n)
     of nkSym, nkEmpty, nkStrLit..nkTripleStrLit, nkCharLit..nkUInt64Lit,
-       nkFloatLit..nkFloat128Lit, nkCommentStmt:
+       nkFloatLit..nkFloat128Lit, nkCommentStmt,
+       nkImportStmt, nkImportExceptStmt, nkFromStmt, nkExportStmt, nkIncludeStmt:
+      # an import/export line is not a use — `from util import sanitize` must
+      # not count as a reference to `sanitize`.
       discard
     of nkVarSection, nkLetSection, nkConstSection:
       walkSection(n, scope)
@@ -163,11 +182,15 @@ proc collectBindings(root: PNode): seq[Binding] =
     of nkDotExpr:
       # `a.b` — only the left side is a name lookup; `b` is a field.
       if n.len >= 1: walk(n[0], scope)
+    of nkExprColonExpr:
+      # `label: value` — named arg, object-constructor field, table key.
+      # The label is not a name reference; only the value is walked.
+      if n.len >= 2: walk(n[1], scope)
     else:
       for c in n: walk(c, scope)
 
   walk(root, Scope(parent: nil, bindings: @[]))
-  all
+  (all, unboundUses)
 
 proc findBindingAt(bindings: seq[Binding], name: string, line, col: int): Binding =
   ## The binding declared at line:col, or whichever binding covers a use there.
@@ -179,6 +202,50 @@ proc findBindingAt(bindings: seq[Binding], name: string, line, col: int): Bindin
     for u in b.uses:
       if u == (line, col): return b
   nil
+
+proc findReferences*(source, filename, symbol: string;
+                     line = -1, col = -1): seq[SymbolReferences] =
+  ## All bindings named `symbol` with their use sites. When `line`/`col` is a
+  ## declaration or use position, only that one binding is returned. An unused
+  ## binding reports zero uses, which is a valid answer — an unknown name
+  ## returns an empty seq instead.
+  let parsed = parseNimString(source, filename)
+  if parsed.ast == nil: return @[]
+  let (bindings, _) = collectBindings(parsed.ast)
+
+  proc lineText(l: int): string =
+    let lines = source.splitLines()
+    if l >= 1 and l <= lines.len: lines[l - 1].strip() else: ""
+
+  proc build(b: Binding): SymbolReferences =
+    result = SymbolReferences(name: symbol, declaredLine: b.declared.line,
+                             declaredCol: b.declared.col)
+    for u in b.uses:
+      result.uses.add Reference(line: u.line, col: u.col, text: lineText(u.line))
+
+  if line >= 1 and col >= 0:
+    let b = findBindingAt(bindings, symbol, line, col)
+    if b == nil: return @[]
+    return @[build(b)]
+
+  for b in bindings:
+    if b.name == symbol: result.add build(b)
+
+proc findUnboundUses*(source, filename, symbol: string): seq[Reference] =
+  ## Every identifier named `symbol` that does NOT resolve to a binding declared
+  ## in this file — the uses that must come from an import (or are a typo). This
+  ## is how a reference crosses a module boundary: an imported name has no local
+  ## binding, so the scope model records it as unbound. Qualified access
+  ## (`util.sanitize`) is not reported, only the module side (`util`) is walked.
+  let parsed = parseNimString(source, filename)
+  if parsed.ast == nil: return @[]
+  let (_, unbound) = collectBindings(parsed.ast)
+  let lines = source.splitLines()
+  for (nm, p) in unbound:
+    if nm != symbol: continue
+    var text = ""
+    if p.line >= 1 and p.line <= lines.len: text = lines[p.line - 1].strip()
+    result.add Reference(line: p.line, col: p.col, text: text)
 
 proc rewrite(source: string, spans: seq[Pos], oldName, newName: string): string =
   ## Replaces `oldName` at each line:col with `newName`, applying each line's
@@ -217,7 +284,7 @@ proc renameScoped*(source, filename, oldName, newName: string;
     return RenameScopedResult(status: srNotFound,
       message: "Could not parse " & filename)
 
-  let bindings = collectBindings(parsed.ast)
+  let (bindings, _) = collectBindings(parsed.ast)
   let target = findBindingAt(bindings, oldName, line, col)
   if target == nil:
     return RenameScopedResult(status: srNotFound, message:
@@ -238,3 +305,14 @@ proc renameScoped*(source, filename, oldName, newName: string;
     occurrences: spans.len, message:
       "Renamed '" & oldName & "' -> '" & newName & "' (" & $spans.len &
       " occurrence(s), scope-local)")
+
+proc renameUnboundUses*(source, filename, oldName, newName: string): string =
+  ## Rewrites every *unbound* use of `oldName` — the uses that must come from
+  ## an import — to `newName`, leaving local bindings and their uses alone. This
+  ## is the cross-file half of a rename: the defining file is rewritten by
+  ## `renameScoped`, each importing file by this.
+  let uses = findUnboundUses(source, filename, oldName)
+  if uses.len == 0: return source
+  var spans: seq[Pos] = @[]
+  for u in uses: spans.add (u.line, u.col)
+  rewrite(source, spans, oldName, newName)

@@ -8,6 +8,7 @@ type
     name: string
     exported: bool
     line: int
+    col: int
     repr: string
 
   InspectRoutineInfo = object
@@ -15,6 +16,7 @@ type
     kind: string
     exported: bool
     line: int
+    col: int
     sig: string
     doc: string
     cc: int
@@ -34,21 +36,25 @@ proc inspectFile*(filePath: string): JsonNode =
   var routines: seq[InspectRoutineInfo] = @[]
 
   for n in collectTypeDefs(parsed.ast):
+    let (dl, dc) = declarationPos(n)
     types.add InspectTypeInfo(
       name: typeDefName(n),
       exported: isExported(n),
-      line: n.info.line.int,
+      line: dl,
+      col: dc,
       repr: renderTypeDefConcise(n)
     )
 
   for n in collectRoutines(parsed.ast):
     let (lo, hi) = nodeLineBounds(n)
     let spanLines = if hi >= lo and lo > 0: hi - lo + 1 else: 1
+    let (dl, dc) = declarationPos(n)
     routines.add InspectRoutineInfo(
       name: routineName(n),
       kind: routineKindName(n),
       exported: isExported(n),
-      line: n.info.line.int,
+      line: dl,
+      col: dc,
       sig: renderRoutineSignature(n),
       doc: docComment(n),
       cc: calcCyclomaticComplexity(n),
@@ -71,6 +77,7 @@ proc inspectFile*(filePath: string): JsonNode =
       "name": t.name,
       "exported": t.exported,
       "line": t.line,
+      "col": t.col,
       "repr": t.repr
     }
 
@@ -81,6 +88,7 @@ proc inspectFile*(filePath: string): JsonNode =
       "kind": r.kind,
       "exported": r.exported,
       "line": r.line,
+      "col": r.col,
       "sig": r.sig,
       "doc": r.doc,
       "cc": r.cc,
