@@ -139,8 +139,7 @@ Usage:
   nimoutline <input_file.nim> [options]
 
 Options:
-  -o, --out:<file>   Specify the output text file path.
-                     If not specified, defaults to <input_file>.outline.txt
+  -o, --out:<file>   Write to a file instead of stdout.
   -h, --help         Show this help message.
 """
     quit(0)
@@ -219,15 +218,18 @@ Options:
 
   let outputText = outputLines.join("\n") & "\n"
 
+  # stdout by default: the caller is usually a pipe or an agent, and writing a
+  # sidecar file it never asked for both litters the tree and forces a second
+  # read to get at the result. `-o` opts back into a file.
   if outputFile == "":
-    outputFile = inputFile.changeFileExt("outline.txt")
-
-  try:
-    writeFile(outputFile, outputText)
-    echo "Outline successfully written to: ", outputFile
-  except CatchableError as e:
-    stderr.writeLine "Error: Could not write outline to: " & outputFile & " (" & e.msg & ")"
-    quit(1)
+    stdout.write outputText
+  else:
+    try:
+      writeFile(outputFile, outputText)
+      echo "Outline successfully written to: ", outputFile
+    except CatchableError as e:
+      stderr.writeLine "Error: Could not write outline to: " & outputFile & " (" & e.msg & ")"
+      quit(1)
 
 when isMainModule:
   main()
