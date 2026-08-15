@@ -141,6 +141,21 @@ Historical defect analysis with reproductions is in
 `thoughts/ledgers/CONTINUITY_CLAUDE-nimtools.md` — the B1/B2/B4/B5/B6/B9 entries are fixed and
 covered by tests; read it for the reasoning, not the current state.
 
+## Known gaps (found by dogfooding, 2026-08-15)
+
+Writing a module summary using only the tools — no file reads — surfaced these:
+
+1. **No module-level doc comment access.** `api-surface` lists signatures,
+   `extract` gives one symbol's doc, but nothing surfaces a module's header `##`
+   block, which is where the *rationale* lives. Every summary needs it, so this
+   is the highest-value missing piece. `docComment` in `ast_utils` already
+   handles routines; a module variant would be small.
+2. **`api-surface` shows no doc comments.** The signature list answers "what can
+   I call" but not "what does it do" — an agent still calls `extract` per symbol.
+   A `--docs` flag reusing `docComment` would close it in one call.
+3. **`unused-imports` is advisory only.** 10/15 agreement with `nim check` on
+   this project. Prefer `nim check` when the project compiles.
+
 ## Self-audit
 
 The toolkit measures itself; `--gate`/`--debt` are not enforced anywhere (no CI, no VCS).
