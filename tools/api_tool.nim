@@ -15,7 +15,7 @@
 ## are "the type as declared", not strictly "the public API of the type".
 
 import compiler/[ast]
-import std/[os, strutils, json, parseopt, algorithm]
+import std/[os, strutils, json, parseopt, algorithm, sequtils]
 import ../shared/[compiler_env, ast_utils, exit_codes]
 
 type
@@ -30,6 +30,24 @@ type
     symbols*: seq[ApiSymbol]
     reExports*: seq[string]  ## modules re-exported via `export`
     privateCount*: int       ## symbols deliberately not shown
+
+type
+  SurfaceChange* = object
+    name*: string
+    kind*: string
+    before*, after*: string   ## the two signatures, for `changed`
+
+  SurfaceDiff* = object
+    added*: seq[ApiSymbol]
+    removed*: seq[ApiSymbol]
+    changed*: seq[SurfaceChange]
+    addedReExports*, removedReExports*: seq[string]
+
+proc isBreaking*(d: SurfaceDiff): bool =
+  ## A change is breaking when existing callers can stop compiling: a symbol
+  ## disappeared (or went private), its signature changed, or a re-export was
+  ## withdrawn. Pure additions are not breaking.
+  d.removed.len > 0 or d.changed.len > 0 or d.removedReExports.len > 0
 
 proc isExportedName(n: PNode): bool =
   ## True when a declaration name node carries the `*` marker.
@@ -142,6 +160,47 @@ proc surfaceOfPaths*(paths: seq[string]): seq[ModuleSurface] =
   files.sort()
   for f in files: result.add surfaceOf(f)
 
+proc diffSurfaces*(before, after: ModuleSurface): SurfaceDiff =
+  ## Compares two exported surfaces. Symbols are matched on name AND kind: a
+  ## `proc foo` replaced by a `template foo` is not the same API element to a
+  ## caller, so it reports as removed+added rather than unchanged.
+  ##
+  ## Overloads share a name; when a name has several entries their signatures
+  ## are compared as a set, so reordering them is not reported as a change.
+  proc key(s: ApiSymbol): string = s.kind & " " & s.name
+
+  proc sigsFor(surface: ModuleSurface, k: string): seq[string] =
+    for s in surface.symbols:
+      if key(s) == k: result.add s.sig
+
+  var seenKeys: seq[string] = @[]
+  for s in before.symbols:
+    let k = key(s)
+    if k in seenKeys: continue
+    seenKeys.add k
+
+    let afterSigs = sigsFor(after, k)
+    if afterSigs.len == 0:
+      result.removed.add s
+      continue
+    let beforeSigs = sigsFor(before, k)
+    # Compare as sets so overload order does not register as a change.
+    for sig in beforeSigs:
+      if sig notin afterSigs:
+        result.changed.add SurfaceChange(name: s.name, kind: s.kind,
+          before: sig, after: afterSigs.join(" | "))
+        break
+
+  for s in after.symbols:
+    let k = key(s)
+    if sigsFor(before, k).len == 0 and not result.added.anyIt(key(it) == k):
+      result.added.add s
+
+  for r in before.reExports:
+    if r notin after.reExports: result.removedReExports.add r
+  for r in after.reExports:
+    if r notin before.reExports: result.addedReExports.add r
+
 proc toJson(s: ModuleSurface): JsonNode =
   var syms = newJArray()
   for sym in s.symbols:
@@ -161,6 +220,123 @@ proc render(s: ModuleSurface): string =
   if s.privateCount > 0:
     result &= ", " & $s.privateCount & " private (hidden)"
   result &= "\n"
+
+proc renderDiff(before, after: string, d: SurfaceDiff): string =
+  result = before & "  ->  " & after & "\n"
+  for s in d.removed:
+    result &= "  - " & s.sig & "\n"
+  for c in d.changed:
+    result &= "  ~ " & c.before & "\n      now: " & c.after & "\n"
+  for s in d.added:
+    result &= "  + " & s.sig & "\n"
+  for r in d.removedReExports:
+    result &= "  - export " & r & "\n"
+  for r in d.addedReExports:
+    result &= "  + export " & r & "\n"
+  if not d.isBreaking and d.added.len == 0 and d.addedReExports.len == 0:
+    result &= "  (no change to the exported surface)\n"
+  elif d.isBreaking:
+    result &= "  BREAKING: " & $d.removed.len & " removed, " &
+              $d.changed.len & " changed\n"
+  else:
+    result &= "  compatible: " & $d.added.len & " added\n"
+
+proc diffMain*(args: seq[string]): int =
+  ## `api-diff BEFORE AFTER` — compares two files, or two directories pairwise
+  ## by matching relative paths.
+  var p = initOptParser(args)
+  var paths: seq[string] = @[]
+  var asJson, helpRequested = false
+
+  while true:
+    p.next()
+    case p.kind
+    of cmdEnd: break
+    of cmdShortOption, cmdLongOption:
+      case p.key.toLowerAscii
+      of "h", "help": helpRequested = true
+      of "j", "json": asJson = true
+      else:
+        stderr.writeLine "Unknown option: --", p.key
+        return ExitError
+    of cmdArgument: paths.add p.key
+
+  if helpRequested or paths.len != 2:
+    echo """
+nimtools api-diff: Did the exported surface change?
+
+Usage:
+  api-diff [--json] BEFORE AFTER
+
+BEFORE and AFTER are both files, or both directories (compared pairwise by
+relative path). Reports added, removed and changed exports.
+
+Exit codes:
+  0  compatible (no change, or additions only)
+  2  breaking   (an export was removed, changed, or a re-export withdrawn)
+
+Options:
+  -j, --json   machine-readable output
+"""
+    return ExitOk
+
+  for path in paths:
+    if not fileExists(path) and not dirExists(path):
+      stderr.writeLine "Error: No such file or directory: ", path
+      return ExitError
+
+  # Pair modules up: for directories, match on the path relative to each root.
+  var pairs: seq[tuple[label: string, before, after: ModuleSurface]] = @[]
+  if dirExists(paths[0]) and dirExists(paths[1]):
+    var rels: seq[string] = @[]
+    for f in surfaceOfPaths(@[paths[0]]):
+      rels.add relativePath(f.file, paths[0])
+    for f in surfaceOfPaths(@[paths[1]]):
+      let r = relativePath(f.file, paths[1])
+      if r notin rels: rels.add r
+    rels.sort()
+    for r in rels:
+      let bPath = paths[0] / r
+      let aPath = paths[1] / r
+      let b = if fileExists(bPath): surfaceOf(bPath) else: ModuleSurface(file: bPath)
+      let a = if fileExists(aPath): surfaceOf(aPath) else: ModuleSurface(file: aPath)
+      pairs.add (r, b, a)
+  else:
+    pairs.add (paths[1], surfaceOf(paths[0]), surfaceOf(paths[1]))
+
+  var breaking = false
+  if asJson:
+    var arr = newJArray()
+    for (label, b, a) in pairs:
+      let d = diffSurfaces(b, a)
+      if d.isBreaking: breaking = true
+      if d.added.len == 0 and d.removed.len == 0 and d.changed.len == 0 and
+         d.addedReExports.len == 0 and d.removedReExports.len == 0: continue
+      var changed = newJArray()
+      for c in d.changed:
+        changed.add %*{"name": c.name, "kind": c.kind,
+                       "before": c.before, "after": c.after}
+      arr.add %*{
+        "module": label, "breaking": d.isBreaking,
+        "added": d.added.mapIt(it.sig),
+        "removed": d.removed.mapIt(it.sig),
+        "changed": changed,
+        "addedReExports": d.addedReExports,
+        "removedReExports": d.removedReExports}
+    echo arr.pretty()
+  else:
+    var printed = 0
+    for (label, b, a) in pairs:
+      let d = diffSurfaces(b, a)
+      if d.isBreaking: breaking = true
+      if d.added.len == 0 and d.removed.len == 0 and d.changed.len == 0 and
+         d.addedReExports.len == 0 and d.removedReExports.len == 0: continue
+      if printed > 0: echo ""
+      stdout.write renderDiff(b.file, label, d)
+      printed.inc
+    if printed == 0:
+      echo "No change to the exported surface."
+  if breaking: ExitRefused else: ExitOk
 
 proc main*(args: seq[string]): int =
   ## CLI entry. Returns an exit code rather than quitting, so the umbrella

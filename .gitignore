@@ -28,3 +28,6 @@ nimcache/
 
 # Claude Code session scratch
 .claude/tsc-cache/
+tests/test_apidiff
+tests/test_effects
+tests/test_imports

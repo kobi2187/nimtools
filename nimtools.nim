@@ -1,6 +1,6 @@
 import std/[os, strutils, json]
 import tools/[find_import_tool, import_tool, move_tool, rename_tool, inspect_tool,
-              extract_tool, doc_tool, api_tool]
+              extract_tool, doc_tool, api_tool, effects_tool]
 import shared/exit_codes
 
 proc printHelp() =
@@ -22,6 +22,10 @@ Available Commands:
   extract        Print one symbol's signature + doc (--body for full source)
   missing-docs   List exported routines that have no doc comment
   api-surface    What a module exports, without reading it
+  api-diff       Compare two exported surfaces; exit 2 if breaking
+  unused-imports Imports whose symbols are never referenced (reports only)
+  raises         Declared exception surface (declared pragmas only)
+  func-candidates  procs with no visible side effect (heuristic)
 
 Exit codes:
   0  completed (changed something, or correctly did nothing)
@@ -117,6 +121,14 @@ proc dispatch(args: seq[string]): int =
     doc_tool.main(rest)
   of "api-surface", "api", "surface":
     api_tool.main(rest)
+  of "api-diff", "diff-api":
+    api_tool.diffMain(rest)
+  of "unused-imports":
+    import_tool.unusedMain(rest)
+  of "raises", "effects":
+    effects_tool.main(rest)
+  of "func-candidates", "funcs":
+    effects_tool.funcMain(rest)
   of "outline":
     delegate("nimoutline", rest)
   of "cyc", "complexity":
