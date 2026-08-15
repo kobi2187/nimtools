@@ -23,10 +23,12 @@ type
     name*: string
     kind*: string     ## proc/func/template/macro/iterator/converter/method/type/const/let/var
     sig*: string      ## one-line signature or rendered type
+    doc*: string      ## the symbol's own doc comment, "" when undocumented
     line*: int
 
   ModuleSurface* = object
     file*: string
+    moduleDoc*: string       ## the module's header `##` block — its rationale
     symbols*: seq[ApiSymbol]
     reExports*: seq[string]  ## modules re-exported via `export`
     privateCount*: int       ## symbols deliberately not shown
@@ -128,17 +130,30 @@ proc surfaceOf*(filePath: string): ModuleSurface =
   let parsed = parseNimFile(filePath)
   if parsed.ast == nil: return
 
+  # The module's own doc block: leading nkCommentStmt children of the root,
+  # before any declaration. A doc attached to a routine belongs to that routine,
+  # so only the run at the very top counts.
+  if parsed.ast.kind == nkStmtList:
+    for c in parsed.ast:
+      if c.kind == nkCommentStmt:
+        if result.moduleDoc.len > 0: result.moduleDoc &= "\n"
+        result.moduleDoc &= c.comment.strip()
+      else:
+        break
+  elif parsed.ast.comment.len > 0:
+    result.moduleDoc = parsed.ast.comment.strip()
+
   for n in collectTypeDefs(parsed.ast):
     if isExported(n):
       result.symbols.add ApiSymbol(name: typeDefName(n), kind: "type",
-        sig: renderTypeDefConcise(n), line: n.info.line.int)
+        sig: renderTypeDefConcise(n), doc: docComment(n), line: n.info.line.int)
     else:
       result.privateCount.inc
 
   for n in collectRoutines(parsed.ast):
     if isExported(n):
       result.symbols.add ApiSymbol(name: routineName(n), kind: routineKindName(n),
-        sig: renderRoutineSignature(n), line: n.info.line.int)
+        sig: renderRoutineSignature(n), doc: docComment(n), line: n.info.line.int)
     else:
       result.privateCount.inc
 
@@ -204,18 +219,27 @@ proc diffSurfaces*(before, after: ModuleSurface): SurfaceDiff =
 proc toJson(s: ModuleSurface): JsonNode =
   var syms = newJArray()
   for sym in s.symbols:
-    syms.add %*{"name": sym.name, "kind": sym.kind, "sig": sym.sig, "line": sym.line}
-  %*{"file": s.file, "symbols": syms, "reExports": s.reExports,
-     "privateCount": s.privateCount}
+    syms.add %*{"name": sym.name, "kind": sym.kind, "sig": sym.sig,
+                "doc": sym.doc, "line": sym.line}
+  %*{"file": s.file, "moduleDoc": s.moduleDoc, "symbols": syms,
+     "reExports": s.reExports, "privateCount": s.privateCount}
 
-proc render(s: ModuleSurface): string =
+proc render(s: ModuleSurface, withDocs = false): string =
   result = s.file & "\n"
+  if withDocs and s.moduleDoc.len > 0:
+    for line in s.moduleDoc.splitLines():
+      result &= "  ## " & line & "\n"
+    result &= "\n"
   if s.symbols.len == 0 and s.reExports.len == 0:
     result &= "  (nothing exported)\n"
   for r in s.reExports:
     result &= "  export " & r & "   (re-export)\n"
   for sym in s.symbols:
     result &= "  " & sym.sig & "\n"
+    if withDocs and sym.doc.len > 0:
+      # First line only: the summary is what a caller needs to choose a symbol;
+      # `extract` gives the full doc when they have chosen one.
+      result &= "      " & sym.doc.splitLines()[0] & "\n"
   result &= "  " & $s.symbols.len & " exported"
   if s.privateCount > 0:
     result &= ", " & $s.privateCount & " private (hidden)"
@@ -343,7 +367,7 @@ proc main*(args: seq[string]): int =
   ## dispatcher stays in control of the process.
   var p = initOptParser(args)
   var paths: seq[string] = @[]
-  var asJson, helpRequested = false
+  var asJson, helpRequested, withDocs = false
 
   while true:
     p.next()
@@ -353,6 +377,7 @@ proc main*(args: seq[string]): int =
       case p.key.toLowerAscii
       of "h", "help": helpRequested = true
       of "j", "json": asJson = true
+      of "d", "docs": withDocs = true
       else:
         stderr.writeLine "Unknown option: --", p.key
         return ExitError
@@ -363,13 +388,14 @@ proc main*(args: seq[string]): int =
 nimtools api-surface: What a module exports, without reading it.
 
 Usage:
-  api-surface [--json] FILE|DIR...
+  api-surface [--docs] [--json] FILE|DIR...
 
 Lists exported routines, types, consts, lets, vars and re-exports, grouped by
 module. Private symbols are never listed — only counted. Exported types are
 rendered as declared, so their private fields do appear in the type line.
 
 Options:
+  -d, --docs   include the module's header doc and each symbol's summary line
   -j, --json   machine-readable output
 """
     return ExitOk
@@ -387,7 +413,7 @@ Options:
   else:
     for i, s in surfaces:
       if i > 0: echo ""
-      stdout.write render(s)
+      stdout.write render(s, withDocs)
   return ExitOk
 
 when isMainModule:

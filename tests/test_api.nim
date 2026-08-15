@@ -100,3 +100,37 @@ suite "api-surface: directories":
     let m = mods.filterIt(it.file.endsWith("m.nim"))[0]
     check m.symbols.anyIt(it.name == "exportedProc")
     check not m.symbols.anyIt(it.name == "onlyPrivate")
+
+suite "api-surface: module documentation":
+  setup: setupFiles()
+
+  test "captures the module header doc comment":
+    writeFile(Dir / "d.nim", """
+## This module does a thing.
+## Second line of rationale.
+
+import std/os
+
+proc f*(): int = 1
+""")
+    check "does a thing" in surfaceOf(Dir / "d.nim").moduleDoc
+
+  test "a module with no header doc has an empty moduleDoc":
+    check surfaceOf(Dir / "n.nim").moduleDoc.len == 0
+
+  test "a routine doc is not mistaken for the module doc":
+    writeFile(Dir / "e.nim", """
+proc f*(): int =
+  ## Routine doc, not module doc.
+  1
+""")
+    check surfaceOf(Dir / "e.nim").moduleDoc.len == 0
+
+  test "symbols carry their own doc comments":
+    writeFile(Dir / "g.nim", """
+proc documented*(): int =
+  ## What it does.
+  1
+""")
+    let s = surfaceOf(Dir / "g.nim").symbols[0]
+    check s.doc == "What it does."
