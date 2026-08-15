@@ -1,0 +1,19 @@
+# Compiled binaries (Nim drops these next to the .nim source, extensionless)
+cyc
+nimoutline
+nimtools
+tools/find_import_tool
+tools/import_tool
+tools/inspect_tool
+tools/move_tool
+tools/rename_tool
+
+# Nim build artifacts
+nimcache/
+*.exe
+
+# Generated tool output
+*.outline.txt
+
+# Claude Code session scratch
+.claude/tsc-cache/
