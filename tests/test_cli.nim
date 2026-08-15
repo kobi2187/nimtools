@@ -54,18 +54,21 @@ proc b(): int =
   i
 """)
 
-  test "--at renames only the binding at that position":
-    let r = run("rename-symbol --at:2:6 " & Scratch / "s.nim i idx")
+  test "rename-scoped renames only the binding at that position":
+    let r = run("rename-scoped --at:2:6 " & Scratch / "s.nim i idx")
     check r.exitCode == 0
     let got = readFile(Scratch / "s.nim")
     check "var idx = 1" in got
     check "var i = 2" in got
 
   test "a bad --at position is an error":
-    check run("rename-symbol --at:99:0 " & Scratch / "s.nim i idx").exitCode == 1
+    check run("rename-scoped --at:99:0 " & Scratch / "s.nim i idx").exitCode == 1
 
   test "malformed --at is an error":
-    check run("rename-symbol --at:nonsense " & Scratch / "s.nim i idx").exitCode == 1
+    check run("rename-scoped --at:nonsense " & Scratch / "s.nim i idx").exitCode == 1
+
+  test "rename-scoped without --at is an error":
+    check run("rename-scoped " & Scratch / "s.nim i idx").exitCode == 1
 
 suite "outline writes to stdout by default":
   setup:

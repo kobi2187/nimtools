@@ -11,11 +11,12 @@ Refuses when the move would produce code that does not compile.
   names the moved code references that would stay in the source file
 - `moveSymbols*(sourceFile, destFile: string, symbolNames: seq[string],
    force = false): MoveResult`
-- `deleteSymbols*(filePath: string, symbolNames: seq[string],
-   force = false): MoveResult` — move without a destination; refuses (mvRefused)
-  when a deleted symbol is still referenced in the file
-- `deleteMain*(args: seq[string]): int` — CLI entry for `nimtools delete-symbol`
 - `main*()` — CLI entry for `nimtools move-symbol`
+
+`delete-symbol` lives in its own module, `tools/delete_tool.nim` — move and
+remove are different roles, not two flags on one tool. `FoundSymbol` /
+`findSymbolNodes` are shared via `ast_utils`, `stripBlankLines` via
+`source_rewriter`.
 
 ## Usage pattern
 ```nim
@@ -49,6 +50,3 @@ toolkit, since an agent cannot eyeball the diff.
   references a moved symbol. Adding it unconditionally left a dead import when
   the move took the module's only proc (found dogfooding: moving `greet` out of
   a one-proc module left an unused `import ./model`).
-- `deleteSymbols` reuses the same find/refuse machinery; its refusal is the
-  mirror image of `findLeftBehindDeps` — staying code referencing the deleted
-  symbol, checked with the scope model (`findReferences`).

@@ -4,6 +4,7 @@ nimoutline
 nimtools
 tools/find_import_tool
 tools/import_tool
+tools/delete_tool
 tools/inspect_tool
 tools/move_tool
 tools/rename_tool
@@ -13,6 +14,7 @@ tools/references_tool
 tests/test_api
 tests/test_ast_utils
 tests/test_cli
+tests/test_delete
 tests/test_extract
 tests/test_inspect
 tests/test_move

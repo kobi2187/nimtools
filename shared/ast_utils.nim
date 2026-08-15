@@ -115,6 +115,28 @@ proc collectTypeDefs*(root: PNode): seq[PNode] =
       for c in n: walk(c, acc)
   walk(root, result)
 
+type
+  FoundSymbol* = object
+    name*: string
+    node*: PNode
+    startLine*: int
+    endLine*: int
+
+proc findSymbolNodes*(root: PNode, symbolNames: seq[string]): seq[FoundSymbol] =
+  ## Every type or routine definition whose name is in `symbolNames`, with its
+  ## 1-based line span. Shared by move and delete; `node` is kept for callers
+  ## that need the AST, `startLine`/`endLine` for line-range edits.
+  for n in collectTypeDefs(root):
+    let name = typeDefName(n)
+    if name in symbolNames:
+      let (s, e) = nodeLineBounds(n)
+      result.add FoundSymbol(name: name, node: n, startLine: s, endLine: e)
+  for n in collectRoutines(root):
+    let name = routineName(n)
+    if name in symbolNames:
+      let (s, e) = nodeLineBounds(n)
+      result.add FoundSymbol(name: name, node: n, startLine: s, endLine: e)
+
 proc renderTypeNode*(n: PNode): string =
   ## Formats any type AST node into a concise, single-line representation.
   if n == nil: return ""

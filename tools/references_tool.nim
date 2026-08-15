@@ -14,9 +14,9 @@
 ## resolution: if two modules export the same name the parser cannot tell which
 ## one a use refers to. Read-only, so a false candidate costs nothing.
 
-import std/[os, strutils, json, parseopt, tables, sets, algorithm]
-import ../shared/[scope_rename, exit_codes, compiler_env, ast_utils]
-import import_tool
+import std/[os, strutils, json, parseopt]
+import ../shared/[scope_rename, exit_codes]
+import project_graph
 
 type
   FileReferences* = object
@@ -28,64 +28,6 @@ type
     symbol*: string
     definedIn*: string
     files*: seq[FileReferences]
-
-proc bareName(path: string): string =
-  ## Last path segment: `std/strutils` -> `strutils`, `model.nim` -> `model`.
-  path.rsplit({'/', '\\'}, 1)[^1].replace(".nim", "")
-
-proc projectFiles*(root: string): seq[string] =
-  ## Every .nim file under `root`, excluding nimcache.
-  for f in walkDirRec(root):
-    if f.endsWith(".nim") and "nimcache" notin f:
-      result.add f
-  result.sort()
-
-proc importersOf*(moduleFile: string): seq[string] =
-  ## .nim files under moduleFile's directory that import it, directly or
-  ## transitively, matched by bare module name. moduleFile itself is excluded.
-  let root = moduleFile.parentDir
-  let target = moduleFile.bareName
-  let files = projectFiles(root)
-  var byName: Table[string, string]
-  for f in files: byName[f.bareName] = f
-
-  var seen: HashSet[string]
-  seen.incl moduleFile
-  var queue: seq[string] = @[]
-
-  # Direct importers first.
-  for f in files:
-    if f in seen: continue
-    let parsed = parseNimFile(f)
-    if parsed.ast == nil: continue
-    for imp in extractExistingImports(parsed.ast):
-      if imp.bareName == target:
-        queue.add f; seen.incl f
-        break
-
-  # Then transitively: a file importing an already-seen file also sees `target`.
-  var i = 0
-  while i < queue.len:
-    let seenBare = queue[i].bareName
-    i.inc
-    for f in files:
-      if f in seen: continue
-      let parsed = parseNimFile(f)
-      if parsed.ast == nil: continue
-      for imp in extractExistingImports(parsed.ast):
-        if imp.bareName == seenBare:
-          queue.add f; seen.incl f
-          break
-  result = queue
-
-proc symbolIsExported*(filePath, symbol: string): bool =
-  let parsed = parseNimFile(filePath)
-  if parsed.ast == nil: return false
-  for n in collectRoutines(parsed.ast):
-    if routineName(n) == symbol and isExported(n): return true
-  for n in collectTypeDefs(parsed.ast):
-    if typeDefName(n) == symbol and isExported(n): return true
-  false
 
 proc findProjectReferences*(filePath, symbol: string;
                             line = -1, col = -1): ProjectReferences =
@@ -145,11 +87,10 @@ proc renderLocal(filePath, symbol: string, refs: seq[SymbolReferences]): string 
   result &= $total & " use(s)"
 
 proc main*(args: seq[string]): int =
-  ## CLI entry. Returns an exit code rather than quitting, so the umbrella
-  ## dispatcher stays in control of the process.
+  ## `references <file> <symbol>` — uses of a binding declared in that file.
   var p = initOptParser(args)
   var file, symbol, at = ""
-  var asJson, project, helpRequested = false
+  var asJson, helpRequested = false
 
   while true:
     p.next()
@@ -160,7 +101,6 @@ proc main*(args: seq[string]): int =
       of "h", "help": helpRequested = true
       of "j", "json": asJson = true
       of "at": at = p.val
-      of "project", "all-files": project = true
       else:
         stderr.writeLine "Unknown option: --", p.key
         return ExitError
@@ -170,22 +110,15 @@ proc main*(args: seq[string]): int =
 
   if helpRequested or file == "" or symbol == "":
     echo """\
-nimtools references: Every use of one symbol, without reading the file.
+nimtools references: Every use of one symbol in a file.
 
 Usage:
-  references [--project] [--at:LINE:COL] [--json] <file.nim> <symbol>
+  references [--at:LINE:COL] [--json] <file.nim> <symbol>
 
-Single-file (default): lists the declaration and every use of `symbol` in that
-file, each as LINE:COL with the stripped source line. --at disambiguates a
-shadowed binding by a declaration or use position.
-
---project: also follows the import graph and lists uses in every module that
-imports the defining module. An imported name is reported as an unbound use, so
-the result is advisory: qualified access (util.sanitize) is not reported, and
-the parser cannot tell two modules exporting the same name apart.
-
-Line is 1-based, column 0-based, matching `inspect`, `extract` and
-`rename-symbol --at`.
+Lists the declaration and every use of `symbol` in that file, each as LINE:COL
+with the stripped source line. --at disambiguates a shadowed binding by a
+declaration or use position. For uses across importing modules, use
+`project-references`.
 
 Exit codes:
   0  found (a symbol with zero uses is a valid answer)
@@ -194,7 +127,6 @@ Exit codes:
 Options:
   -j, --json           machine-readable output
       --at:LINE:COL    report one binding, selected by a declaration or use
-      --project        cross-file: follow importers of the defining module
 """
     return ExitOk
 
@@ -215,27 +147,6 @@ Options:
       stderr.writeLine "Error: --at expects a 1-based line and 0-based column"
       return ExitError
 
-  if project:
-    let r = findProjectReferences(file, symbol, line, col)
-    if r.files.len == 0:
-      stderr.writeLine "Error: Symbol '", symbol, "' not found in ", file
-      return ExitError
-    if asJson:
-      var jFiles = newJArray()
-      for f in r.files:
-        var jUses = newJArray()
-        for u in f.uses:
-          jUses.add %*{"line": u.line, "col": u.col, "text": u.text}
-        var obj = %*{"file": f.file, "uses": jUses}
-        if f.declared.line > 0:
-          obj["declared"] = %*{"line": f.declared.line, "col": f.declared.col}
-        jFiles.add obj
-      echo $(%*{"symbol": r.symbol, "definedIn": r.definedIn,
-                "files": jFiles}).pretty()
-    else:
-      echo renderProject(r)
-    return ExitOk
-
   let refs = findReferences(readFile(file), file, symbol, line, col)
   if refs.len == 0:
     stderr.writeLine "Error: Symbol '", symbol, "' not found in ", file
@@ -252,6 +163,72 @@ Options:
     echo $(%*{"file": file, "symbol": symbol, "bindings": jBindings}).pretty()
   else:
     echo renderLocal(file, symbol, refs)
+  ExitOk
+
+proc projectMain*(args: seq[string]): int =
+  ## `project-references <file> <symbol>` — uses across importing modules.
+  var p = initOptParser(args)
+  var file, symbol = ""
+  var asJson, helpRequested = false
+
+  while true:
+    p.next()
+    case p.kind
+    of cmdEnd: break
+    of cmdShortOption, cmdLongOption:
+      case p.key.toLowerAscii
+      of "h", "help": helpRequested = true
+      of "j", "json": asJson = true
+      else:
+        stderr.writeLine "Unknown option: --", p.key
+        return ExitError
+    of cmdArgument:
+      if file == "": file = p.key
+      elif symbol == "": symbol = p.key
+
+  if helpRequested or file == "" or symbol == "":
+    echo """\
+nimtools project-references: Every use of a symbol across its importers.
+
+Usage:
+  project-references [--json] <file.nim> <symbol>
+
+Lists uses of `symbol` in the defining file and in every module that imports
+it. An imported name is reported as an unbound use, so the result is advisory:
+qualified access (util.fn) is not reported, and the parser cannot tell two
+modules exporting the same name apart.
+
+Exit codes:
+  0  found (a symbol with zero uses is a valid answer)
+  1  symbol not found, parse failure, or missing file
+
+Options:
+  -j, --json   machine-readable output
+"""
+    return ExitOk
+
+  if not fileExists(file):
+    stderr.writeLine "Error: File not found: ", file
+    return ExitError
+
+  let r = findProjectReferences(file, symbol)
+  if r.files.len == 0:
+    stderr.writeLine "Error: Symbol '", symbol, "' not found in ", file
+    return ExitError
+  if asJson:
+    var jFiles = newJArray()
+    for f in r.files:
+      var jUses = newJArray()
+      for u in f.uses:
+        jUses.add %*{"line": u.line, "col": u.col, "text": u.text}
+      var obj = %*{"file": f.file, "uses": jUses}
+      if f.declared.line > 0:
+        obj["declared"] = %*{"line": f.declared.line, "col": f.declared.col}
+      jFiles.add obj
+    echo $(%*{"symbol": r.symbol, "definedIn": r.definedIn,
+              "files": jFiles}).pretty()
+  else:
+    echo renderProject(r)
   ExitOk
 
 when isMainModule:

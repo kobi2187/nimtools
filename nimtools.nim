@@ -1,6 +1,7 @@
 import std/[os, strutils, json]
-import tools/[find_import_tool, import_tool, move_tool, rename_tool, inspect_tool,
-              extract_tool, doc_tool, api_tool, effects_tool, references_tool]
+import tools/[find_import_tool, import_tool, move_tool, delete_tool, rename_tool,
+              inspect_tool, extract_tool, doc_tool, api_tool, effects_tool,
+              references_tool]
 import shared/exit_codes
 
 proc printHelp() =
@@ -14,12 +15,15 @@ Available Commands:
   outline        Generate concise one-line types & routine signatures from a file
   cyc            Audit McCabe cyclomatic complexity on real AST
   find-import    Discover missing symbols and their module paths across stdlib/Nimble/project
-  references     Every use of a symbol (line:col), built on the scope model
+  references     Every use of a symbol in one file (line:col), scope model
+  project-references  Every use of a symbol across its importing modules
   add-import     Deterministically insert an import into a file
   rm-import      Deterministically remove an import from a file
   move-symbol    Migrate procs/types between files with auto-export & import wiring
   delete-symbol  Remove a proc/type definition (refuses if still referenced)
-  rename-symbol  Lexer-safe identifier renaming (ignoring strings & comments)
+  rename-symbol  Whole-file token rename (skips strings & comments)
+  rename-scoped  Rename one binding + its uses (--at:LINE:COL)
+  rename-project Rename an exported symbol across its importers (--at:LINE:COL)
   inspect        Emit comprehensive JSON model of a file (AST, symbols, complexity)
   extract        Print one symbol's signature + doc (--body for full source)
   missing-docs   List exported routines that have no doc comment
@@ -62,6 +66,8 @@ proc dispatch(args: seq[string]): int =
     ExitOk
   of "references", "refs", "find-references":
     references_tool.main(rest)
+  of "project-references", "project-refs", "find-project-references":
+    references_tool.projectMain(rest)
   of "add-import":
     if rest.len < 2: return usage("Usage: nimtools add-import <file.nim> <module1> [module2 ...]")
     for m in rest[1..^1]:
@@ -85,53 +91,13 @@ proc dispatch(args: seq[string]): int =
     of mvRefused: stderr.writeLine r.message; ExitRefused
     of mvError:   usage("Error: " & r.message)
   of "delete-symbol", "delete":
-    move_tool.deleteMain(rest)
+    delete_tool.deleteMain(rest)
   of "rename-symbol", "rename":
-    # --at:LINE:COL selects scope-aware mode: rename the binding at that
-    # position and only the uses that resolve to it. Without it the rename is
-    # token-level and hits every matching identifier in the file. --project
-    # extends scope-aware mode across every module that imports the file.
-    var at = ""
-    var project = false
-    var pos: seq[string] = @[]
-    for a in rest:
-      if a.startsWith("--at:"): at = a[5..^1]
-      elif a in ["--project", "-p"]: project = true
-      else: pos.add a
-    if pos.len < 3:
-      return usage("Usage: nimtools rename-symbol [--project] [--at:LINE:COL] <file.nim> <oldName> <newName>")
-
-    var line = -1
-    var col = -1
-    if at.len > 0:
-      let parts = at.split(':')
-      if parts.len != 2:
-        return usage("Error: --at expects LINE:COL, got '" & at & "'")
-      line = try: parseInt(parts[0]) except ValueError: -1
-      col = try: parseInt(parts[1]) except ValueError: -1
-      if line < 1 or col < 0:
-        return usage("Error: --at expects a 1-based line and 0-based column, got '" & at & "'")
-
-    if project:
-      if at.len == 0:
-        return usage("Error: --project needs --at:LINE:COL to pick the binding")
-      let r = renameProjectScoped(pos[0], pos[1], pos[2], line, col)
-      case r.status
-      of srRenamed:  echo r.message; ExitOk
-      of srConflict: stderr.writeLine r.message; ExitRefused
-      of srNotFound: usage("Error: " & r.message)
-    elif at.len > 0:
-      let r = renameScopedInFile(pos[0], pos[1], pos[2], line, col)
-      case r.status
-      of srRenamed:  echo r.message; ExitOk
-      of srConflict: stderr.writeLine r.message; ExitRefused
-      of srNotFound: usage("Error: " & r.message)
-    else:
-      let r = renameInFile(pos[0], pos[1], pos[2])
-      case r.status
-      of rnRenamed: echo r.message; ExitOk
-      of rnNoOp:    echo r.message; ExitOk   # nothing to change is not a failure
-      of rnError:   usage("Error: " & r.message)
+    rename_tool.tokenMain(rest)
+  of "rename-scoped", "scope-rename":
+    rename_tool.scopedMain(rest)
+  of "rename-project", "project-rename":
+    rename_tool.projectMain(rest)
   of "inspect", "json":
     if rest.len < 1: return usage("Usage: nimtools inspect <file.nim>")
     let report = inspectFile(rest[0])

@@ -56,34 +56,3 @@ proc b(x: int): int = a(x)
     check "proc a" notin readFile(src)   # a's definition gone
     check "b" in readFile(src)           # b stays, calls a
     check "import" in readFile(src)      # back-import wired so b still compiles
-
-suite "delete-symbol":
-  test "removes a self-contained symbol's definition":
-    let (src, _) = setupFiles()
-    let r = deleteSymbols(src, @["standalone"])
-    check r.status == mvMoved
-    check "standalone" notin readFile(src)
-    check "usesPerson" in readFile(src)
-
-  test "refuses to delete a symbol that is still referenced":
-    let (src, _) = setupFiles()
-    writeFile(src, """
-proc helper(x: int): int = x
-proc main() =
-  echo helper(1)
-""")
-    let r = deleteSymbols(src, @["helper"])
-    check r.status == mvRefused
-    check "helper" in readFile(src)
-
-  test "force overrides the delete refusal":
-    let (src, _) = setupFiles()
-    writeFile(src, """
-proc helper(x: int): int = x
-proc main() =
-  echo helper(1)
-""")
-    let r = deleteSymbols(src, @["helper"], force = true)
-    check r.status == mvMoved
-    check "proc helper" notin readFile(src)   # definition gone
-    check "main" in readFile(src)             # call site left (broken, as forced)

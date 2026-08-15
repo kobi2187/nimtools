@@ -17,6 +17,15 @@ proc extractLineRange*(source: string, startLine, endLine: int): string =
     return lines[lo..hi].join(detectLineEnding(source))
   return ""
 
+proc stripBlankLines*(s: string): string =
+  ## Removes leading and trailing blank lines left by a line-range deletion,
+  ## without touching the indentation of the remaining first/last code lines.
+  let eol = detectLineEnding(s)
+  var lines = s.splitLines()
+  while lines.len > 0 and lines[0].strip().len == 0: lines.delete(0)
+  while lines.len > 0 and lines[^1].strip().len == 0: lines.delete(lines.high)
+  lines.join(eol)
+
 proc replaceLineRange*(source: string, startLine, endLine: int, replacement: string): string =
   ## Replaces 1-based lines from `startLine` to `endLine` inclusive with `replacement`.
   let lines = source.splitLines()

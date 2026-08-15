@@ -43,9 +43,11 @@ nimtools.nim        Umbrella CLI — dispatch() routes subcommands, returns exit
 ├── tools/          Each module is BOTH a library (exports procs) and a binary (isMainModule)
 │   ├── find_import_tool.nim   symbol search across stdlib/nimble/project -> import path
 │   ├── import_tool.nim        add/remove imports; owns extractExistingImports
-│   ├── move_tool.nim          move procs/types; delete-symbol; refuses unsafe moves
-│   ├── rename_tool.nim        token-level rename (semantic path refuses; not built yet)
-│   ├── references_tool.nim    every use of a symbol (line:col), on the scope model
+│   ├── move_tool.nim          move procs/types; refuses unsafe moves
+│   ├── delete_tool.nim        delete-symbol; refuses when still referenced in-file
+│   ├── rename_tool.nim        rename-symbol / rename-scoped / rename-project
+│   ├── references_tool.nim    references / project-references (single vs cross-file)
+│   ├── project_graph.nim      import graph shared by the cross-file tools
 │   ├── inspect_tool.nim       JSON model of a file
 │   ├── extract_tool.nim       one symbol: signature first, --body opt-in
 │   ├── api_tool.nim           api-surface / api-diff
@@ -126,19 +128,23 @@ references. `--force` overrides.
 `"std / [os, json]"`. The spaced form was the cause of both the dirty JSON and the duplicate-import
 bug — nothing could match against it.
 
-### Rename has two modes — pick deliberately
+### Rename is three commands — pick deliberately
 
-`nimtools rename-symbol --at:LINE:COL file.nim old new` is **scope-aware**: it resolves which
-binding that position names and rewrites only the uses resolving to it. A local `i` stays local;
-a shadowing `for i in ...` is a different binding and is left alone. Line is 1-based, column
-0-based (compiler convention — `inspect` and `extract` report positions in exactly this form).
+`rename-symbol file.nim old new` is **token-level**: every matching identifier in the file, no
+scope model. It skips strings and comments but will happily clobber an unrelated local of the
+same name. The right tool for a file-wide mechanical rename.
 
-Without `--at` the rename is **token-level**: every matching identifier in the file, no scope
-model. It skips strings and comments but will happily clobber an unrelated local of the same name.
-Kept because it is the right tool for a file-wide mechanical rename.
+`rename-scoped --at:LINE:COL file.nim old new` is **scope-aware**: it resolves which binding
+that position names and rewrites only the uses resolving to it. A local `i` stays local; a
+shadowing `for i in ...` is a different binding and is left alone.
 
-Neither mode crosses files. `renameSemantic` (nimsuggest, project-wide) refuses rather than
-pretending — see `tools/rename_tool.nim` for why the previous attempt was withdrawn.
+`rename-project --at:LINE:COL file.nim old new` renames an **exported** symbol across every
+module that imports its file, refusing (exit 2) when another local module also exports the
+name. Line is 1-based, column 0-based (compiler convention — `inspect` and `extract` report
+positions in exactly this form).
+
+None of these is `renameSemantic` (nimsuggest, full project graph + overloads) — that refuses
+rather than pretending. See `tools/rename_tool.nim`.
 
 Historical defect analysis with reproductions is in
 `thoughts/ledgers/CONTINUITY_CLAUDE-nimtools.md` — the B1/B2/B4/B5/B6/B9 entries are fixed and
@@ -168,14 +174,14 @@ Driving a full refactor loop (create → rename → move → find → delete) in
 `playground/` with the tools alone surfaced a different layer of gaps — the
 write side, where an agent does most of its work. Two are now closed, two stand.
 
-5. ~~`references` is single-file~~ — **fixed**: `references --project` follows the
+5. ~~`references` is single-file~~ — **fixed**: `project-references` follows the
    import graph and reports an imported symbol's *unbound* uses in every module
    that imports its defining module. Advisory: qualified access (`util.fn`) is
    not reported, and the parser cannot tell two same-named exporters apart.
-6. ~~No cross-file rename~~ — **fixed**: `rename-symbol --project --at:LINE:COL`
-   renames the definition and its uses in the defining file, then rewrites
-   unbound uses in each importer. Refuses (exit 2) when another local module
-   also exports the name (ambiguous), and leaves a shadowing local alone.
+6. ~~No cross-file rename~~ — **fixed**: `rename-project --at:LINE:COL` renames
+   the definition and its uses in the defining file, then rewrites unbound uses
+   in each importer. Refuses (exit 2) when another local module also exports
+   the name (ambiguous), and leaves a shadowing local alone.
 7. **No edit-symbol / change-signature — and deliberately so.** "Replace a
    function body" is already deterministic for the agent: `extract --body`
    returns the exact source with `line:col` bounds, and the model edits that
@@ -183,9 +189,9 @@ write side, where an agent does most of its work. Two are now closed, two stand.
    a parameter) is the unsafe case — UFCS makes call sites ambiguous at parser
    level — and is deferred to a semantic pass, not faked.
 8. **`delete-symbol` is single-file** — it refuses only on in-file references,
-   not project-wide. `references --project` now supplies the blast radius an
-   agent can check first; a `delete-symbol --project` guard is a natural next
-   step but not yet written.
+   not project-wide. `project-references` now supplies the blast radius an
+   agent can check first; a project-wide delete guard is a natural next step
+   but not yet written.
 
 ## Self-audit
 

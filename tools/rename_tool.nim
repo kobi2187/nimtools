@@ -1,6 +1,6 @@
 import std/[os, strutils, parseopt, osproc, streams]
 import ../shared/[source_rewriter, compiler_env, exit_codes, scope_rename]
-import references_tool
+import project_graph
 export scope_rename
 
 proc renameScopedInFile*(filePath, oldName, newName: string;
@@ -106,13 +106,20 @@ proc renameSemantic*(projectFile, targetFile: string, line, col: int,
     "Use `rename-symbol <file> <old> <new>` for single-file token rename, " &
     "which cannot scope locals or cross files.")
 
-proc main*() =
-  var p = initOptParser()
-  var targetFile = ""
-  var oldName = ""
-  var newName = ""
-  var helpRequested = false
+proc parseLineCol(at: string): tuple[line, col: int; ok: bool] =
+  ## Validates a `LINE:COL` string (1-based line, 0-based column).
+  let parts = at.split(':')
+  if parts.len != 2: return (-1, -1, false)
+  let line = try: parseInt(parts[0]) except ValueError: -1
+  let col = try: parseInt(parts[1]) except ValueError: -1
+  if line < 1 or col < 0: return (-1, -1, false)
+  (line, col, true)
 
+proc tokenMain*(args: seq[string]): int =
+  ## `rename-symbol <file> <old> <new>` — token-level, whole file.
+  var p = initOptParser(args)
+  var file, oldName, newName = ""
+  var helpRequested = false
   while true:
     p.next()
     case p.kind
@@ -122,33 +129,135 @@ proc main*() =
       of "h", "help": helpRequested = true
       else:
         stderr.writeLine "Unknown option: --", p.key
-        quit(1)
+        return ExitError
     of cmdArgument:
-      if targetFile == "": targetFile = p.key
+      if file == "": file = p.key
       elif oldName == "": oldName = p.key
       elif newName == "": newName = p.key
       else:
         stderr.writeLine "Unexpected argument: ", p.key
-        quit(1)
+        return ExitError
 
-  if helpRequested or targetFile == "" or oldName == "" or newName == "":
-    echo """
-nimtools rename-symbol: Lexer-safe identifier renaming (skipping comments and strings).
+  if helpRequested or file == "" or oldName == "" or newName == "":
+    echo """\
+nimtools rename-symbol: Lexer-safe whole-file identifier rename.
 
 Usage:
   rename-symbol <file.nim> <oldName> <newName>
 
-Examples:
-  rename-symbol src/main.nim oldHelperName newHelperName
+Rewrites every matching identifier token, skipping strings and comments. It has
+no scope model — a local `i` hits every `i`. For one binding only, use
+`rename-scoped`; for an exported symbol across modules, `rename-project`.
 """
-    quit(0)
+    return ExitOk
 
-  let r = renameInFile(targetFile, oldName, newName)
+  let r = renameInFile(file, oldName, newName)
   case r.status
-  of rnRenamed, rnNoOp: echo r.message
-  of rnError:
-    stderr.writeLine "Error: ", r.message
-    quit(ExitError)
+  of rnRenamed, rnNoOp: echo r.message; ExitOk
+  of rnError: stderr.writeLine "Error: ", r.message; ExitError
+
+proc scopedMain*(args: seq[string]): int =
+  ## `rename-scoped --at:LINE:COL <file> <old> <new>` — one binding, one file.
+  var p = initOptParser(args)
+  var file, oldName, newName, at = ""
+  var helpRequested = false
+  while true:
+    p.next()
+    case p.kind
+    of cmdEnd: break
+    of cmdShortOption, cmdLongOption:
+      case p.key.toLowerAscii
+      of "h", "help": helpRequested = true
+      of "at": at = p.val
+      else:
+        stderr.writeLine "Unknown option: --", p.key
+        return ExitError
+    of cmdArgument:
+      if file == "": file = p.key
+      elif oldName == "": oldName = p.key
+      elif newName == "": newName = p.key
+      else:
+        stderr.writeLine "Unexpected argument: ", p.key
+        return ExitError
+
+  if helpRequested or file == "" or oldName == "" or newName == "":
+    echo """\
+nimtools rename-scoped: Rename one binding and the uses that resolve to it.
+
+Usage:
+  rename-scoped --at:LINE:COL <file.nim> <oldName> <newName>
+
+The position picks which declaration the rename targets, so a local `i` stays
+local and a shadowing `for i in ...` is a different binding. Line is 1-based,
+column 0-based — `inspect` and `extract` report the same form.
+"""
+    return ExitOk
+
+  if at.len == 0:
+    stderr.writeLine "Error: rename-scoped needs --at:LINE:COL to pick the binding"
+    return ExitError
+  let (line, col, ok) = parseLineCol(at)
+  if not ok:
+    stderr.writeLine "Error: --at expects a 1-based line and 0-based column, got '", at, "'"
+    return ExitError
+
+  let r = renameScopedInFile(file, oldName, newName, line, col)
+  case r.status
+  of srRenamed:  echo r.message; ExitOk
+  of srConflict: stderr.writeLine r.message; ExitRefused
+  of srNotFound: stderr.writeLine "Error: ", r.message; ExitError
+
+proc projectMain*(args: seq[string]): int =
+  ## `rename-project --at:LINE:COL <file> <old> <new>` — an exported symbol,
+  ## across every module that imports its file.
+  var p = initOptParser(args)
+  var file, oldName, newName, at = ""
+  var helpRequested = false
+  while true:
+    p.next()
+    case p.kind
+    of cmdEnd: break
+    of cmdShortOption, cmdLongOption:
+      case p.key.toLowerAscii
+      of "h", "help": helpRequested = true
+      of "at": at = p.val
+      else:
+        stderr.writeLine "Unknown option: --", p.key
+        return ExitError
+    of cmdArgument:
+      if file == "": file = p.key
+      elif oldName == "": oldName = p.key
+      elif newName == "": newName = p.key
+      else:
+        stderr.writeLine "Unexpected argument: ", p.key
+        return ExitError
+
+  if helpRequested or file == "" or oldName == "" or newName == "":
+    echo """\
+nimtools rename-project: Rename an exported symbol across its importers.
+
+Usage:
+  rename-project --at:LINE:COL <file.nim> <oldName> <newName>
+
+Renames the definition and its uses in `file`, then rewrites unbound uses in
+every module that imports it. Refuses (exit 2) when another local module also
+exports the name — a use in an importer would then be ambiguous.
+"""
+    return ExitOk
+
+  if at.len == 0:
+    stderr.writeLine "Error: rename-project needs --at:LINE:COL to pick the binding"
+    return ExitError
+  let (line, col, ok) = parseLineCol(at)
+  if not ok:
+    stderr.writeLine "Error: --at expects a 1-based line and 0-based column, got '", at, "'"
+    return ExitError
+
+  let r = renameProjectScoped(file, oldName, newName, line, col)
+  case r.status
+  of srRenamed:  echo r.message; ExitOk
+  of srConflict: stderr.writeLine r.message; ExitRefused
+  of srNotFound: stderr.writeLine "Error: ", r.message; ExitError
 
 when isMainModule:
-  main()
+  quit(tokenMain(commandLineParams()))
