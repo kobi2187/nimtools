@@ -16,6 +16,7 @@ tests/test_inspect
 tests/test_move
 tests/test_outline
 tests/test_rewriter
+tests/test_scope
 
 # Nim build artifacts
 nimcache/

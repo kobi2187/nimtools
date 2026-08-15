@@ -52,6 +52,7 @@ nimtools.nim        Umbrella CLI — dispatch() routes subcommands, returns exit
     ├── compiler_env.nim       parser setup with silenced hooks + structured error capture
     ├── ast_utils.nim          walkers, names, render, doc comments, complexity
     ├── source_rewriter.nim    line-range edit, export marker, lexer-guided rename
+    ├── scope_rename.nim       scope-stack walker; renames one binding, not a name
     ├── path_resolver.nim      file path -> idiomatic import path
     └── exit_codes.nim         0 ok / 1 error / 2 refused
 
@@ -122,12 +123,19 @@ references. `--force` overrides.
 `"std / [os, json]"`. The spaced form was the cause of both the dirty JSON and the duplicate-import
 bug — nothing could match against it.
 
-### Scope limit worth knowing
+### Rename has two modes — pick deliberately
 
-`rename-symbol` is token-level: it correctly skips strings and comments, but has **no scope
-model**, so it renames every matching identifier in the file — rename a local `i` and you hit
-every `i`. It cannot cross files. `renameSemantic` refuses rather than pretending. Scope-aware
-rename needs a scope-stack walker; cross-file rename needs nimsuggest.
+`nimtools rename-symbol --at:LINE:COL file.nim old new` is **scope-aware**: it resolves which
+binding that position names and rewrites only the uses resolving to it. A local `i` stays local;
+a shadowing `for i in ...` is a different binding and is left alone. Line is 1-based, column
+0-based (compiler convention — `inspect` and `extract` report positions in exactly this form).
+
+Without `--at` the rename is **token-level**: every matching identifier in the file, no scope
+model. It skips strings and comments but will happily clobber an unrelated local of the same name.
+Kept because it is the right tool for a file-wide mechanical rename.
+
+Neither mode crosses files. `renameSemantic` (nimsuggest, project-wide) refuses rather than
+pretending — see `tools/rename_tool.nim` for why the previous attempt was withdrawn.
 
 Historical defect analysis with reproductions is in
 `thoughts/ledgers/CONTINUITY_CLAUDE-nimtools.md` — the B1/B2/B4/B5/B6/B9 entries are fixed and
