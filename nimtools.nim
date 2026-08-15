@@ -1,5 +1,7 @@
 import std/[os, strutils, json]
-import tools/[find_import_tool, import_tool, move_tool, rename_tool, inspect_tool]
+import tools/[find_import_tool, import_tool, move_tool, rename_tool, inspect_tool,
+              extract_tool, doc_tool]
+import shared/exit_codes
 
 proc printHelp() =
   echo """
@@ -17,77 +19,93 @@ Available Commands:
   move-symbol    Migrate procs/types between files with auto-export & import wiring
   rename-symbol  Lexer-safe identifier renaming (ignoring strings & comments)
   inspect        Emit comprehensive JSON model of a file (AST, symbols, complexity)
+  extract        Print one symbol's signature + doc (--body for full source)
+  missing-docs   List exported routines that have no doc comment
+
+Exit codes:
+  0  completed (changed something, or correctly did nothing)
+  1  error (missing file, parse failure, symbol not found)
+  2  refused (would emit non-compiling code; --force to override)
 
 For command-specific help, run:
   nimtools <command> --help
 """
 
+proc usage(msg: string): int =
+  ## Prints a usage line and yields the error exit code.
+  stderr.writeLine msg
+  ExitError
+
+proc delegate(binary: string, args: seq[string]): int =
+  ## Runs a sibling binary resolved next to THIS executable, not the cwd.
+  ## A relative "./name" only works when the cwd happens to be the project
+  ## root, which silently breaks every other working directory.
+  let exe = getAppDir() / binary
+  if not fileExists(exe):
+    return usage("Error: helper binary not found: " & exe &
+                 " (build it with: nim c -d:release " & binary & ".nim)")
+  execShellCmd(exe.quoteShell & " " & args.quoteShellCommand())
+
+proc dispatch(args: seq[string]): int =
+  let cmd = args[0].toLowerAscii
+  let rest = if args.len > 1: args[1..^1] else: @[]
+  case cmd
+  of "find-import", "find", "search":
+    find_import_tool.main(rest)
+    ExitOk
+  of "add-import":
+    if rest.len < 2: return usage("Usage: nimtools add-import <file.nim> <module1> [module2 ...]")
+    for m in rest[1..^1]:
+      if not addImportToFile(rest[0], m): return ExitError
+    ExitOk
+  of "rm-import", "remove-import":
+    if rest.len < 2: return usage("Usage: nimtools rm-import <file.nim> <module1> [module2 ...]")
+    for m in rest[1..^1]:
+      if not removeImportFromFile(rest[0], m): return ExitError
+    ExitOk
+  of "move-symbol", "move-proc", "move-type", "move":
+    var force = false
+    var pos: seq[string] = @[]
+    for a in rest:
+      if a in ["--force", "-f"]: force = true else: pos.add a
+    if pos.len < 3:
+      return usage("Usage: nimtools move-symbol [--force] <source.nim> <destination.nim> <symbol1> [...]")
+    let r = moveSymbols(pos[0], pos[1], pos[2..^1], force = force)
+    case r.status
+    of mvMoved:   echo r.message; ExitOk
+    of mvRefused: stderr.writeLine r.message; ExitRefused
+    of mvError:   usage("Error: " & r.message)
+  of "rename-symbol", "rename":
+    if rest.len < 3: return usage("Usage: nimtools rename-symbol <file.nim> <oldName> <newName>")
+    let r = renameInFile(rest[0], rest[1], rest[2])
+    case r.status
+    of rnRenamed: echo r.message; ExitOk
+    of rnNoOp:    echo r.message; ExitOk   # nothing to change is not a failure
+    of rnError:   usage("Error: " & r.message)
+  of "inspect", "json":
+    if rest.len < 1: return usage("Usage: nimtools inspect <file.nim>")
+    let report = inspectFile(rest[0])
+    echo report.pretty()
+    if report.hasKey("error"): ExitError else: ExitOk
+  of "extract", "show":
+    extract_tool.main(rest)
+  of "missing-docs", "undocumented":
+    doc_tool.main(rest)
+  of "outline":
+    delegate("nimoutline", rest)
+  of "cyc", "complexity":
+    delegate("cyc", rest)
+  else:
+    stderr.writeLine "Unknown command: ", cmd
+    printHelp()
+    ExitError
+
 proc main() =
   let args = commandLineParams()
   if args.len == 0 or args[0] in ["-h", "--help", "help"]:
     printHelp()
-    quit(0)
-
-  let cmd = args[0].toLowerAscii
-  case cmd
-  of "find-import", "find", "search":
-    find_import_tool.main(if args.len > 1: args[1..^1] else: @[])
-  of "add-import":
-    var newArgs = @["add"]
-    if args.len > 1: newArgs.add args[1..^1]
-    # We can invoke directly
-    if args.len >= 3:
-      let targetFile = args[1]
-      for m in args[2..^1]:
-        discard addImportToFile(targetFile, m)
-    else:
-      echo "Usage: nimtools add-import <file.nim> <module1> [module2 ...]"
-  of "rm-import", "remove-import":
-    if args.len >= 3:
-      let targetFile = args[1]
-      for m in args[2..^1]:
-        discard removeImportFromFile(targetFile, m)
-    else:
-      echo "Usage: nimtools rm-import <file.nim> <module1> [module2 ...]"
-  of "move-symbol", "move-proc", "move-type", "move":
-    if args.len >= 4:
-      let src = args[1]
-      let dest = args[2]
-      let syms = args[3..^1]
-      if moveSymbols(src, dest, syms):
-        echo "Move operation completed successfully."
-      else:
-        quit(1)
-    else:
-      echo "Usage: nimtools move-symbol <source.nim> <destination.nim> <symbol1> [symbol2 ...]"
-  of "rename-symbol", "rename":
-    if args.len >= 4:
-      let target = args[1]
-      let oldName = args[2]
-      let newName = args[3]
-      if renameInFile(target, oldName, newName):
-        echo "Rename complete."
-      else:
-        quit(1)
-    else:
-      echo "Usage: nimtools rename-symbol <file.nim> <oldName> <newName>"
-  of "inspect", "json":
-    if args.len >= 2:
-      echo inspectFile(args[1]).pretty()
-    else:
-      echo "Usage: nimtools inspect <file.nim>"
-  of "outline":
-    # Delegate to nimoutline binary or logic
-    let res = execShellCmd("./nimoutline " & args[1..^1].quoteShellCommand())
-    quit(res)
-  of "cyc", "complexity":
-    # Delegate to cyc binary or logic
-    let res = execShellCmd("./cyc " & args[1..^1].quoteShellCommand())
-    quit(res)
-  else:
-    stderr.writeLine "Unknown command: ", cmd
-    printHelp()
-    quit(1)
+    quit(ExitOk)
+  quit(dispatch(args))
 
 when isMainModule:
   main()
