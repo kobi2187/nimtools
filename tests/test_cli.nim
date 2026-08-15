@@ -32,6 +32,15 @@ suite "delegation works outside project root":
   test "cyc runs from another cwd":
     check run("cyc " & Scratch / "f.nim", workDir = "/tmp").exitCode == 0
 
+suite "api-surface through the CLI":
+  test "reports the exit-code contract":
+    let r = run("api-surface " & Root / "shared/exit_codes.nim")
+    check r.exitCode == 0
+    check "ExitRefused* = 2" in r.output
+
+  test "a missing path is an error":
+    check run("api-surface /nope/missing.nim").exitCode == 1
+
 suite "scoped rename through the CLI":
   setup:
     removeDir(Scratch); createDir(Scratch)

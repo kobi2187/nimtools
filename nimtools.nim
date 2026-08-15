@@ -1,6 +1,6 @@
 import std/[os, strutils, json]
 import tools/[find_import_tool, import_tool, move_tool, rename_tool, inspect_tool,
-              extract_tool, doc_tool]
+              extract_tool, doc_tool, api_tool]
 import shared/exit_codes
 
 proc printHelp() =
@@ -21,6 +21,7 @@ Available Commands:
   inspect        Emit comprehensive JSON model of a file (AST, symbols, complexity)
   extract        Print one symbol's signature + doc (--body for full source)
   missing-docs   List exported routines that have no doc comment
+  api-surface    What a module exports, without reading it
 
 Exit codes:
   0  completed (changed something, or correctly did nothing)
@@ -114,6 +115,8 @@ proc dispatch(args: seq[string]): int =
     extract_tool.main(rest)
   of "missing-docs", "undocumented":
     doc_tool.main(rest)
+  of "api-surface", "api", "surface":
+    api_tool.main(rest)
   of "outline":
     delegate("nimoutline", rest)
   of "cyc", "complexity":
