@@ -16,6 +16,7 @@ type
     exported: bool
     line: int
     sig: string
+    doc: string
     cc: int
     lines: int
 
@@ -32,42 +33,27 @@ proc inspectFile*(filePath: string): JsonNode =
   var types: seq[InspectTypeInfo] = @[]
   var routines: seq[InspectRoutineInfo] = @[]
 
-  proc walk(n: PNode) =
-    if n == nil: return
-    if n.kind == nkTypeDef:
-      let name = typeDefName(n)
-      types.add InspectTypeInfo(
-        name: name,
-        exported: isExported(n),
-        line: n.info.line.int,
-        repr: renderTypeDefConcise(n)
-      )
-    elif n.kind in RoutineKinds:
-      let name = routineName(n)
-      let kindStr = case n.kind
-        of nkProcDef: "proc"
-        of nkFuncDef: "func"
-        of nkMethodDef: "method"
-        of nkIteratorDef: "iterator"
-        of nkTemplateDef: "template"
-        of nkMacroDef: "macro"
-        of nkConverterDef: "converter"
-        else: "routine"
-      let (lo, hi) = nodeLineBounds(n)
-      let spanLines = if hi >= lo and lo > 0: hi - lo + 1 else: 1
-      routines.add InspectRoutineInfo(
-        name: name,
-        kind: kindStr,
-        exported: isExported(n),
-        line: n.info.line.int,
-        sig: renderRoutineSignature(n),
-        cc: calcCyclomaticComplexity(n),
-        lines: spanLines
-      )
-    elif hasSons(n):
-      for c in n: walk(c)
+  for n in collectTypeDefs(parsed.ast):
+    types.add InspectTypeInfo(
+      name: typeDefName(n),
+      exported: isExported(n),
+      line: n.info.line.int,
+      repr: renderTypeDefConcise(n)
+    )
 
-  walk(parsed.ast)
+  for n in collectRoutines(parsed.ast):
+    let (lo, hi) = nodeLineBounds(n)
+    let spanLines = if hi >= lo and lo > 0: hi - lo + 1 else: 1
+    routines.add InspectRoutineInfo(
+      name: routineName(n),
+      kind: routineKindName(n),
+      exported: isExported(n),
+      line: n.info.line.int,
+      sig: renderRoutineSignature(n),
+      doc: docComment(n),
+      cc: calcCyclomaticComplexity(n),
+      lines: spanLines
+    )
 
   # Complexity summary
   var maxCc = 0
@@ -96,6 +82,7 @@ proc inspectFile*(filePath: string): JsonNode =
       "exported": r.exported,
       "line": r.line,
       "sig": r.sig,
+      "doc": r.doc,
       "cc": r.cc,
       "lines": r.lines
     }
