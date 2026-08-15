@@ -145,16 +145,14 @@ covered by tests; read it for the reasoning, not the current state.
 
 Writing a module summary using only the tools — no file reads — surfaced these:
 
-1. **No module-level doc comment access.** `api-surface` lists signatures,
-   `extract` gives one symbol's doc, but nothing surfaces a module's header `##`
-   block, which is where the *rationale* lives. Every summary needs it, so this
-   is the highest-value missing piece. `docComment` in `ast_utils` already
-   handles routines; a module variant would be small.
-2. **`api-surface` shows no doc comments.** The signature list answers "what can
-   I call" but not "what does it do" — an agent still calls `extract` per symbol.
-   A `--docs` flag reusing `docComment` would close it in one call.
-3. **`unused-imports` is advisory only.** 10/15 agreement with `nim check` on
+1. ~~No module-level doc access~~ — **fixed**: `api-surface --docs` now shows the
+   module's header `##` block and each symbol's summary line. Use it as the
+   first call when learning an unfamiliar module; it usually replaces the read.
+2. **`unused-imports` is advisory only.** 10/15 agreement with `nim check` on
    this project. Prefer `nim check` when the project compiles.
+3. **`raises` reports UNDECLARED for nearly everything** on codebases that don't
+   annotate effects — correct, but low signal. Worth pairing with `nim check`'s
+   inferred effects if that ever matters.
 
 ## Self-audit
 
