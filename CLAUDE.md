@@ -153,6 +153,13 @@ Writing a module summary using only the tools — no file reads — surfaced the
 3. **`raises` reports UNDECLARED for nearly everything** on codebases that don't
    annotate effects — correct, but low signal. Worth pairing with `nim check`'s
    inferred effects if that ever matters.
+4. **`api-surface` is blind to executables.** A CLI module exports nothing, so
+   the surface is empty and the tool reports only a private count — on `cyc.nim`,
+   `0 exported, 33 private (hidden)`, which tells an agent nothing about a file
+   whose entire content is those 33 procs. Correct for a library, useless for a
+   program. Wants an `--all` flag (private symbols included) or an automatic
+   fallback when nothing is exported. Found by dogfooding 2026-08-15 while
+   trying to learn `cyc.nim` without reading it; `outline` was the workaround.
 
 ## Self-audit
 
