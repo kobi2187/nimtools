@@ -1,7 +1,8 @@
 import std/[os, strutils, json]
 import tools/[find_import_tool, import_tool, move_tool, delete_tool, rename_tool,
               inspect_tool, extract_tool, doc_tool, api_tool, effects_tool,
-              references_tool, check_tool, organize_imports_tool, type_report_tool]
+              references_tool, check_tool, organize_imports_tool, type_report_tool,
+              extract_variable_tool]
 import shared/exit_codes
 
 proc printHelp() =
@@ -35,6 +36,7 @@ Available Commands:
   raises         Declared exception surface (declared pragmas only)
   func-candidates  procs with no visible side effect (heuristic)
   type-report   Resolve type(s) at point(s); at/function/module layers
+  extract-variable  Pull an expression into a let above its statement
 
 Exit codes:
   0  completed (changed something, or correctly did nothing)
@@ -131,6 +133,8 @@ proc dispatch(args: seq[string]): int =
     of "function": type_report_tool.functionMain(rest[1..^1])
     of "module": type_report_tool.moduleMain(rest[1..^1])
     else: usage("Unknown type-report layer: " & rest[0] & " (want: at, function, module)")
+  of "extract-variable", "extract-var":
+    extract_variable_tool.main(rest)
   of "outline":
     delegate("nimoutline", rest)
   of "cyc", "complexity":
