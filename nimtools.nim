@@ -128,6 +128,8 @@ proc dispatch(args: seq[string]): int =
     if rest.len < 1: return usage("Usage: nimtools type-report <at|function|module> ...")
     case rest[0]
     of "at": type_report_tool.atMain(rest[1..^1])
+    of "function": type_report_tool.functionMain(rest[1..^1])
+    of "module": type_report_tool.moduleMain(rest[1..^1])
     else: usage("Unknown type-report layer: " & rest[0] & " (want: at, function, module)")
   of "outline":
     delegate("nimoutline", rest)

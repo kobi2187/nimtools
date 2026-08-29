@@ -3,6 +3,7 @@
 
 import std/[unittest, os, sequtils, strutils]
 import ../shared/suggest
+import ../tools/type_report_tool
 
 const Scratch = getTempDir() / "nimtools_test_type_report"
 
@@ -62,3 +63,50 @@ else:
       check results.len == 1
       check results[0].status == ssUnavailable
       check results[0].message.len > 0
+
+  suite "type-report function: locals of one proc":
+    setup:
+      let dir2 = Scratch / "func_layer"
+      writeProject(dir2, {
+        "m.nim": "proc compute*(a: int): int =\n" &
+                 "  var tmp = a * 2\n" &
+                 "  let doubled = tmp\n" &
+                 "  doubled\n"})
+
+    test "reports the proc signature and each local binding":
+      if nimsuggestPath().len == 0:
+        skip()
+      else:
+        let report = functionTypeReport(dir2 / "m.nim", dir2 / "m.nim", 1, 6)
+        check report.status == ssOk
+        check "int" in report.signature   # proc (a: int): int -- nimsuggest's type text, not the name
+        check report.locals.len == 2   # tmp, doubled
+        for l in report.locals:
+          check l.status == ssOk
+
+    test "reports ssNoResult when the position names no routine":
+      if nimsuggestPath().len == 0:
+        skip()
+      else:
+        # Line 5 is past the end of the 4-line fixture -- no enclosing routine.
+        let report = functionTypeReport(dir2 / "m.nim", dir2 / "m.nim", 5, 0)
+        check report.status == ssNoResult
+
+  suite "type-report module: every top-level declaration":
+    setup:
+      let dir3 = Scratch / "module_layer"
+      writeProject(dir3, {
+        "m.nim": "proc pub*(a: int): int = a + 1\n" &
+                 "proc priv(a: int): int = a - 1\n" &
+                 "const K* = 42\n"})
+
+    test "reports every top-level proc and const":
+      if nimsuggestPath().len == 0:
+        skip()
+      else:
+        let results = moduleTypeReport(dir3 / "m.nim", dir3 / "m.nim")
+        check results.len == 3
+        let names = results.mapIt(it.name)
+        check "pub" in names
+        check "priv" in names
+        check "K" in names
