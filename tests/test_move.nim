@@ -56,3 +56,49 @@ proc b(x: int): int = a(x)
     check "proc a" notin readFile(src)   # a's definition gone
     check "b" in readFile(src)           # b stays, calls a
     check "import" in readFile(src)      # back-import wired so b still compiles
+
+suite "move-symbol topo order":
+  # Nim resolves top-level const/let/proc/type in textual order, not two-pass --
+  # verified experimentally (`const b = a + 1; const a = 10` fails to compile).
+  # A blind append in argument/source order can therefore emit a destination
+  # file that does not compile even though the source file did.
+
+  test "reorders moved procs so a dependency lands before its dependent":
+    let (src, dest) = setupFiles()
+    writeFile(src, """
+proc h*(): int = f()
+proc f*(): int = g() + 1
+proc g*(): int = 10
+""")
+    # Requested out of dependency order: h (depends on f) before f before g.
+    let r = moveSymbols(src, dest, @["h", "f", "g"])
+    check r.status == mvMoved
+    let destText = readFile(dest)
+    check destText.find("proc g") < destText.find("proc f")
+    check destText.find("proc f") < destText.find("proc h")
+
+  test "refuses a cycle among the moved symbols rather than emit broken order":
+    let (src, dest) = setupFiles()
+    writeFile(src, """
+proc isEven*(n: int): bool =
+  if n == 0: true else: isOdd(n-1)
+proc isOdd*(n: int): bool =
+  if n == 0: false else: isEven(n-1)
+""")
+    let r = moveSymbols(src, dest, @["isEven", "isOdd"])
+    check r.status == mvRefused
+    check "isEven" in r.deps
+    check "isOdd" in r.deps
+    check not fileExists(dest)
+
+  test "force moves a cycle anyway, in original order":
+    let (src, dest) = setupFiles()
+    writeFile(src, """
+proc isEven*(n: int): bool =
+  if n == 0: true else: isOdd(n-1)
+proc isOdd*(n: int): bool =
+  if n == 0: false else: isEven(n-1)
+""")
+    let r = moveSymbols(src, dest, @["isEven", "isOdd"], force = true)
+    check r.status == mvMoved
+    check fileExists(dest)
