@@ -1,7 +1,7 @@
 import std/[os, strutils, json]
 import tools/[find_import_tool, import_tool, move_tool, delete_tool, rename_tool,
               inspect_tool, extract_tool, doc_tool, api_tool, effects_tool,
-              references_tool, check_tool, organize_imports_tool]
+              references_tool, check_tool, organize_imports_tool, type_report_tool]
 import shared/exit_codes
 
 proc printHelp() =
@@ -34,6 +34,7 @@ Available Commands:
   unused-imports Imports whose symbols are never referenced (reports only)
   raises         Declared exception surface (declared pragmas only)
   func-candidates  procs with no visible side effect (heuristic)
+  type-report   Resolve type(s) at point(s); at/function/module layers
 
 Exit codes:
   0  completed (changed something, or correctly did nothing)
@@ -123,6 +124,11 @@ proc dispatch(args: seq[string]): int =
     effects_tool.main(rest)
   of "func-candidates", "funcs":
     effects_tool.funcMain(rest)
+  of "type-report", "types":
+    if rest.len < 1: return usage("Usage: nimtools type-report <at|function|module> ...")
+    case rest[0]
+    of "at": type_report_tool.atMain(rest[1..^1])
+    else: usage("Unknown type-report layer: " & rest[0] & " (want: at, function, module)")
   of "outline":
     delegate("nimoutline", rest)
   of "cyc", "complexity":

@@ -51,7 +51,8 @@ proc nimsuggestPath*(): string =
   ## Empty when nimsuggest is not installed.
   findExe("nimsuggest")
 
-proc parseRow*(row: string): tuple[section: string, loc: SuggestLoc, ok: bool] =
+proc parseRow*(row: string): tuple[section: string, loc: SuggestLoc,
+                                   typ: string, ok: bool] =
   ## A reply row, or ok=false for the banner and blank lines nimsuggest also
   ## prints. Anything not shaped like a result is skipped rather than fatal.
   let f = row.split('\t')
@@ -59,7 +60,7 @@ proc parseRow*(row: string): tuple[section: string, loc: SuggestLoc, ok: bool] =
   if f[0] notin ["def", "use"]: return
   let line = try: parseInt(f[5]) except ValueError: return
   let col = try: parseInt(f[6]) except ValueError: return
-  (f[0], SuggestLoc(file: f[4], line: line, col: col), true)
+  (f[0], SuggestLoc(file: f[4], line: line, col: col), f[3], true)
 
 proc runSuggest(projectRoot, command: string): tuple[output: string, ok: bool,
                                                      message: string] =
@@ -108,3 +109,58 @@ proc queryUses*(projectRoot, file: string; line, col: int): SuggestReply =
     reply.message = "nimsuggest resolved no symbol at " & file & ":" &
                     $line & ":" & $col
   reply
+
+type
+  TypeResult* = object
+    loc*: SuggestLoc          ## the location this result answers for
+    typ*: string              ## resolved type/signature text; "" when not ssOk
+    status*: SuggestStatus
+    message*: string          ## why, when status is not ssOk
+
+proc queryTypes*(projectRoot: string; locs: seq[SuggestLoc]): seq[TypeResult] =
+  ## Resolves the type at each location in `locs` using ONE nimsuggest process
+  ## for the whole batch — N query lines piped through the same `--stdin`
+  ## session, not N process spawns. The ~8s cost is nimsuggest's project
+  ## compile, paid once per call regardless of how many locations are asked.
+  if locs.len == 0: return @[]
+
+  var query = ""
+  for loc in locs:
+    query.add "def " & loc.file.absolutePath & ":" & $loc.line & ":" & $loc.col & "\n"
+  query.setLen(query.len - 1)  # drop trailing newline; runSuggest appends "\nquit\n"
+
+  let r = runSuggest(projectRoot, query)
+  if not r.ok:
+    for loc in locs:
+      result.add TypeResult(loc: loc, status: ssUnavailable, message: r.message)
+    return
+
+  # Each `def` query emits at most one "def" row (or none, if nothing resolves
+  # there) followed by that symbol's "use" rows for the WHOLE project — which
+  # this call does not want. Only "def" rows are kept, in the order nimsuggest
+  # emitted them, which is the order the queries were issued in.
+  var defRows: seq[tuple[loc: SuggestLoc, typ: string]] = @[]
+  for row in r.output.splitLines:
+    let p = parseRow(row)
+    if p.ok and p.section == "def":
+      defRows.add (p.loc, p.typ)
+
+  # Match def rows back to the requested locations positionally: nimsuggest
+  # answers `def` queries in the order they were sent, one def row per query
+  # that resolved (a query naming no symbol emits zero rows for that query).
+  # Since a silent skip cannot be told apart from "this query's answer is
+  # still pending", a location gets ssNoResult only when strictly fewer def
+  # rows came back than locations were sent, applied to the tail.
+  if defRows.len == locs.len:
+    for i, loc in locs:
+      result.add TypeResult(loc: loc, typ: defRows[i].typ, status: ssOk)
+  else:
+    # Fewer defs than queries: report what resolved, in order, then mark the
+    # remaining locations (the ones nimsuggest had nothing to say about) as
+    # ssNoResult rather than guessing which index they were.
+    for i in 0 ..< defRows.len:
+      result.add TypeResult(loc: locs[i], typ: defRows[i].typ, status: ssOk)
+    for i in defRows.len ..< locs.len:
+      result.add TypeResult(loc: locs[i], status: ssNoResult,
+        message: "nimsuggest resolved no symbol at " & locs[i].file & ":" &
+                 $locs[i].line & ":" & $locs[i].col)

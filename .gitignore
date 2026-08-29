@@ -40,3 +40,5 @@ tests/test_suggest
 tests/test_check
 tools/organize_imports_tool
 tests/test_organize_imports
+tools/type_report_tool
+tests/test_type_report
