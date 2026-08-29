@@ -2,7 +2,7 @@ import std/[os, strutils, json]
 import tools/[find_import_tool, import_tool, move_tool, delete_tool, rename_tool,
               inspect_tool, extract_tool, doc_tool, api_tool, effects_tool,
               references_tool, check_tool, organize_imports_tool, type_report_tool,
-              extract_variable_tool]
+              extract_variable_tool, change_signature_tool]
 import shared/exit_codes
 
 proc printHelp() =
@@ -37,6 +37,7 @@ Available Commands:
   func-candidates  procs with no visible side effect (heuristic)
   type-report   Resolve type(s) at point(s); at/function/module layers
   extract-variable  Pull an expression into a let above its statement
+  change-signature  Add/remove/reorder a proc's params, fix up call sites
 
 Exit codes:
   0  completed (changed something, or correctly did nothing)
@@ -135,6 +136,8 @@ proc dispatch(args: seq[string]): int =
     else: usage("Unknown type-report layer: " & rest[0] & " (want: at, function, module)")
   of "extract-variable", "extract-var":
     extract_variable_tool.main(rest)
+  of "change-signature", "change-sig":
+    change_signature_tool.main(rest)
   of "outline":
     delegate("nimoutline", rest)
   of "cyc", "complexity":
