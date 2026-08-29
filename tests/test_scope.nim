@@ -171,3 +171,49 @@ proc f() =
     check findUnboundUses(Src, "t.nim", "sanitize").len == 0
     check findUnboundUses(Src, "t.nim", "name").len == 0
     check findUnboundUses(Src, "t.nim", "flag").len == 0
+
+suite "scope-aware walk: while and block bodies":
+  # Regression: walkBody used to re-walk the node it was given, so nkWhileStmt /
+  # nkBlockStmt re-entered their own case arm and recursed until the stack blew.
+  # Any file with a `while` — every parseopt loop in this repo — crashed the
+  # reference and rename tools outright.
+
+  test "a while loop terminates and its body is searched":
+    const Src = """
+proc f(n: int): int =
+  var total = 0
+  var i = 0
+  while i < n:
+    total = total + i
+    i = i + 1
+  total
+"""
+    let refs = findReferences(Src, "t.nim", "total", 2, 6)
+    check refs.len == 1
+    check refs[0].uses.len == 3       # while body twice, trailing result
+
+  test "a block statement terminates and its label is not a use":
+    const Src = """
+proc f(n: int): int =
+  var total = 0
+  block outer:
+    total = total + n
+  total
+"""
+    let refs = findReferences(Src, "t.nim", "total", 2, 6)
+    check refs.len == 1
+    check refs[0].uses.len == 3       # assignment target, rhs, trailing result
+    check findUnboundUses(Src, "t.nim", "outer").len == 0
+
+  test "a binding declared inside a while body stays scoped to it":
+    const Src = """
+proc f(n: int): int =
+  var i = 0
+  while i < n:
+    var tmp = i * 2
+    i = i + tmp
+  i
+"""
+    let refs = findReferences(Src, "t.nim", "tmp", 4, 8)
+    check refs.len == 1
+    check refs[0].uses.len == 1

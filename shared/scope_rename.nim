@@ -119,8 +119,15 @@ proc collectBindings(root: PNode): tuple[bindings: seq[Binding],
   proc walk(n: PNode, scope: Scope) {.gcsafe.}
 
   proc walkBody(n: PNode, scope: Scope) =
-    ## Walks a node in a fresh child scope.
-    if n != nil: walk(n, Scope(parent: scope, bindings: @[]))
+    ## Walks a node's CHILDREN in a fresh child scope. It must not walk `n`
+    ## itself: `walk` would dispatch to the same case arm and call back here
+    ## forever. `walkRoutine`/`walkFor` above pick their children explicitly for
+    ## the same reason.
+    if n == nil: return
+    let inner = Scope(parent: scope, bindings: @[])
+    # `block label:` — child 0 names a block, not a value, so it is not a use.
+    let first = if n.kind in {nkBlockStmt, nkBlockExpr}: 1 else: 0
+    for i in first ..< n.len: walk(n[i], inner)
 
   proc walkSection(n: PNode, scope: Scope) =
     ## var/let/const: each nkIdentDefs declares names[0..^3]; the type and the
