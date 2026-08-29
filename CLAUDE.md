@@ -243,14 +243,12 @@ write side, where an agent does most of its work. Two are now closed, two stand.
    the definition and its uses in the defining file, then rewrites unbound uses
    in each importer. Refuses (exit 2) when another local module also exports
    the name (ambiguous), and leaves a shadowing local alone.
-7. **No edit-symbol / change-signature — and deliberately so.** "Replace a
-   function body" is already deterministic for the agent: `extract --body`
-   returns the exact source with `line:col` bounds, and the model edits that
-   exact text. A dedicated tool adds no safety. "Change signature" (add/remove
-   a parameter) is the unsafe case — UFCS makes call sites ambiguous at parser
-   level — and is deferred to a semantic pass, not faked. **That semantic pass
-   now exists** (`shared/suggest.nim`), so the stated blocker is gone and
-   change-signature is buildable rather than deferred.
+7. ~~No edit-symbol / change-signature — and deliberately so.~~ — **fixed**:
+   `change-signature --at:LINE:COL` adds/removes/reorders a parameter and
+   fixes up every call site via `findSemanticReferences`. `--remove-param`
+   refuses when a call site's argument could have a side effect (mirrors
+   `move-symbol`'s `findLeftBehindDeps`); `--force` overrides. One operation
+   per invocation.
 8. **`delete-symbol` is single-file** — it refuses only on in-file references,
    not project-wide. `project-references --semantic` now supplies a *complete*
    blast radius, which is what a project-wide delete guard needs: guarding on
@@ -275,6 +273,29 @@ write side, where an agent does most of its work. Two are now closed, two stand.
     a missing `:` still listed its `proc`. The diagnostics now exist
     (`ParseResult.diagnostics`); `inspect` still discards them. Same class as
     the reference-engine over-claim, and now a small fix. Not yet done.
+
+## Known gaps (fourth pass, 2026-08-29)
+
+Closed via `docs/superpowers/specs/2026-08-29-intent-level-tools-design.md`:
+`change-signature`, `organize-imports`, `type-report` (at/function/module
+layers), `extract-variable`. `type-report` exposes the type column
+`shared/suggest.nim`'s `parseRow` already parsed from every nimsuggest `def`
+reply but had been discarding.
+
+13. **`extract-variable` replaces only the exact selected span** — no search
+    for textually-identical occurrences elsewhere in the function, no
+    same-scope/no-intervening-mutation check, no `let` vs `var` choice when
+    the target is later reassigned. Deliberately narrow for this pass;
+    flagged in the design spec as needing refinement.
+14. **`extract-function` and `inline-variable` are not built.** Each needs
+    insertion-point selection and scoping analysis materially larger than
+    `extract-variable`'s exact-span replacement; deferred to its own design
+    pass rather than folded into this one.
+15. **nimsuggest is still one process per invocation**, so `change-signature`
+    and every `type-report` layer pay the same ~8s project-compile cost
+    `references --semantic` already does (gap #9). A persistent nimsuggest
+    would benefit all of these at once — still the upgrade path, still not
+    built.
 
 ## Self-audit
 

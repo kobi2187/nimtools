@@ -37,6 +37,10 @@ Run via the umbrella CLI (`nimtools <command> ...`) or each `tools/*.nim` standa
 | `rename-project` | Cross-file rename of an exported symbol |
 | `references` / `project-references` | Find uses; `--semantic` for a complete answer via nimsuggest |
 | `syntax-check` | Does it parse — 0.8ms/file, no imports loaded |
+| `change-signature` | Add/remove/reorder a proc's params; fixes up every call site |
+| `organize-imports` | Sort and dedupe a file's imports |
+| `extract-variable` | Pull a selected expression into a `let` above its statement |
+| `type-report` | Resolved type at a point / of a function's locals / of a whole module |
 | `doc` | Routines missing doc comments |
 
 ## Design
