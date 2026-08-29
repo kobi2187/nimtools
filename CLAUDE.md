@@ -51,6 +51,7 @@ nimtools.nim        Umbrella CLI — dispatch() routes subcommands, returns exit
 │   ├── inspect_tool.nim       JSON model of a file
 │   ├── extract_tool.nim       one symbol: signature first, --body opt-in
 │   ├── api_tool.nim           api-surface / api-diff
+│   ├── check_tool.nim         syntax-check: does it parse (0.8ms, no imports)
 │   └── doc_tool.nim           routines missing doc comments
 └── shared/
     ├── compiler_env.nim       parser setup with silenced hooks + structured error capture
@@ -59,6 +60,7 @@ nimtools.nim        Umbrella CLI — dispatch() routes subcommands, returns exit
     ├── scope_rename.nim       scope-stack walker; renames one binding, not a name;
     │                          also findReferences (uses with line:col)
     ├── path_resolver.nim      file path -> idiomatic import path
+    ├── suggest.nim            SEMANTIC engine: drives nimsuggest over --stdin
     └── exit_codes.nim         0 ok / 1 error / 2 refused
 
 cyc.nim             SELF-CONTAINED complexity CLI  — still duplicates ast_utils
@@ -128,6 +130,61 @@ references. `--force` overrides.
 `"std / [os, json]"`. The spaced form was the cause of both the dirty JSON and the duplicate-import
 bug — nothing could match against it.
 
+### Three checking speeds — know which question each answers
+
+There is no "check this module but skip its imports" semantic mode, and there
+cannot be: without `strutils`'s symbol table, `s.strip` is indistinguishable from
+a typo. Loading imports is what makes type checking possible. What `nim check`
+already does is the cheap half — it sems dependencies for their symbols and
+never codegens them.
+
+| tool | cost here | catches |
+|---|---|---|
+| `nimtools syntax-check` | **0.8 ms/file** (24 files in 7 ms) | syntax only |
+| `nim check <file>` | ~1.4 s | full types, loads imports |
+| persistent nimsuggest `chk` | 8.3 s warmup, then 0.35 s | full types |
+
+`syntax-check` exists for the two jobs `nim check` cannot do: gating the
+destructive write tools (`move-symbol`, `rename-project`, `delete-symbol` rewrite
+files in place — "does it still parse" is the first question after, and at 0.8 ms
+an agent can ask after every write), and answering on a module mid-refactor whose
+imports do not resolve yet.
+
+It states its own scope in every reply (`syntax only: type errors need
+nim check`) for the same reason the reference engines do — a verdict that gets
+read as "compiles" is worse than no verdict.
+
+The parse errors it reports were always being computed; `compiler_env` captured
+them and every caller discarded them. `ParseResult.diagnostics` now carries them
+structured (line, col, message) beside the legacy prose `errors`.
+
+### Two engines, and the answer says which one replied
+
+Parser (lexical) and nimsuggest (semantic) are both first-class; neither replaces the other.
+
+**Parser** — no compile, milliseconds, correct for *shape*: `outline`, `api-surface`, `cyc`,
+`doc`, `inspect`, `extract`. Shape questions do not need identity, and should not pay a compile.
+
+**Semantic** (`shared/suggest.nim`) — needed for *identity*. `x.foo` is a field access or a UFCS
+call to `foo(x)` depending on the type of `x`, and the parser cannot tell. This is not a rounding
+error: `project-references tools/project_graph.nim bareName` reported **0 uses** for a proc with
+**10**, every one of them written UFCS-style. An agent trusting that deletes live code.
+
+`suggest.nim` drives the `nimsuggest` that ships with Nim rather than reimplementing sem. Over
+`--stdin` the protocol is one line out, tab-separated rows back, so `osproc.execCmdEx` (which
+takes stdin text directly) is the entire driver — no pipes, no supervision.
+
+The rule that makes the split safe: **an incomplete engine must never answer as if complete.**
+`project-references` names its engine in text output and carries `"engine"` / `"complete"` in
+JSON. `--semantic` never silently falls back to the parser — if nimsuggest is missing or times
+out it exits `1` with the reason, because a lexical guess wearing a semantic label is precisely
+the failure the path exists to remove.
+
+nimsuggest sees only modules reachable from its root, so `pickProjectRoot` (in `project_graph`)
+picks a top module that imports the target. Note `importersOf` searches only a module's own
+directory — `projectRootDir` climbs past that deliberately, since inheriting the blind spot would
+under-report the importers the semantic path was added to find.
+
 ### Rename is three commands — pick deliberately
 
 `rename-symbol file.nim old new` is **token-level**: every matching identifier in the file, no
@@ -174,10 +231,14 @@ Driving a full refactor loop (create → rename → move → find → delete) in
 `playground/` with the tools alone surfaced a different layer of gaps — the
 write side, where an agent does most of its work. Two are now closed, two stand.
 
-5. ~~`references` is single-file~~ — **fixed**: `project-references` follows the
-   import graph and reports an imported symbol's *unbound* uses in every module
-   that imports its defining module. Advisory: qualified access (`util.fn`) is
-   not reported, and the parser cannot tell two same-named exporters apart.
+5. ~~`references` is single-file~~ — **fixed, then fixed properly**:
+   `project-references` follows the import graph and reports an imported
+   symbol's *unbound* uses. That parser path silently under-reports — it misses
+   UFCS (`x.fn`) and qualified (`util.fn`) uses entirely, and cannot tell two
+   same-named exporters apart. `--semantic` resolves with nimsuggest instead and
+   is complete for every module reachable from the root. Both label themselves;
+   parser mode still says `"complete": false`. Single-file `references` has no
+   `--semantic` yet and carries the same blind spot.
 6. ~~No cross-file rename~~ — **fixed**: `rename-project --at:LINE:COL` renames
    the definition and its uses in the defining file, then rewrites unbound uses
    in each importer. Refuses (exit 2) when another local module also exports
@@ -187,11 +248,33 @@ write side, where an agent does most of its work. Two are now closed, two stand.
    returns the exact source with `line:col` bounds, and the model edits that
    exact text. A dedicated tool adds no safety. "Change signature" (add/remove
    a parameter) is the unsafe case — UFCS makes call sites ambiguous at parser
-   level — and is deferred to a semantic pass, not faked.
+   level — and is deferred to a semantic pass, not faked. **That semantic pass
+   now exists** (`shared/suggest.nim`), so the stated blocker is gone and
+   change-signature is buildable rather than deferred.
 8. **`delete-symbol` is single-file** — it refuses only on in-file references,
-   not project-wide. `project-references` now supplies the blast radius an
-   agent can check first; a project-wide delete guard is a natural next step
-   but not yet written.
+   not project-wide. `project-references --semantic` now supplies a *complete*
+   blast radius, which is what a project-wide delete guard needs: guarding on
+   the parser path would refuse on incomplete data and, worse, permit on it.
+
+## Known gaps (third pass, 2026-08-16)
+
+9. **Semantic mode costs ~8s** on this project (nimsuggest compiles it), vs
+   ~20ms for the parser. One-shot process per invocation; a persistent
+   nimsuggest is the upgrade path if that ever hurts.
+10. **`rename-project` is still parser-only** and inherits the UFCS blind spot,
+    so it can rewrite a definition and leave UFCS call sites untouched. Routing
+    it through `findSemanticReferences` is the next step and needs no new
+    machinery.
+11. **`importersOf` searches only a module's own directory**, so parser-mode
+    cross-file answers miss importers living in a parent or sibling directory
+    (`nimtools.nim` importing `tools/references_tool` is invisible to it).
+    `pickProjectRoot` works around this with `projectRootDir`; `importersOf`
+    itself is unfixed.
+12. **`inspect` reports exit 0 and clean JSON on a file that does not parse.**
+    It emits a *partial* model from whatever the parser recovered — a file with
+    a missing `:` still listed its `proc`. The diagnostics now exist
+    (`ParseResult.diagnostics`); `inspect` still discards them. Same class as
+    the reference-engine over-claim, and now a small fix. Not yet done.
 
 ## Self-audit
 

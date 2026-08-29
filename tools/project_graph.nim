@@ -56,6 +56,64 @@ proc importersOf*(moduleFile: string): seq[string] =
           break
   result = queue
 
+proc projectRootDir*(file: string): string =
+  ## Topmost ancestor directory still holding .nim files. `importersOf` searches
+  ## only a module's own directory, which is why it cannot see `nimtools.nim`
+  ## importing `tools/references_tool` — a root picker inheriting that blind spot
+  ## would under-report exactly what the semantic path exists to fix.
+  result = file.parentDir
+  while true:
+    let parent = result.parentDir
+    if parent.len == 0 or parent == result: break
+    var hasNim = false
+    for f in walkDir(parent):
+      if f.kind == pcFile and f.path.endsWith(".nim"): hasNim = true; break
+    if not hasNim: break
+    result = parent
+
+proc pickProjectRoot*(moduleFile: string): string =
+  ## The widest root to open nimsuggest with: a module that reaches `moduleFile`
+  ## through imports and that nothing else imports. nimsuggest sees only modules
+  ## reachable from its root, so opening it on `moduleFile` itself would cover
+  ## that file's imports and miss every one of its *importers*. Falls back to the
+  ## file itself when nothing imports it.
+  let target = moduleFile.bareName
+  let files = projectFiles(projectRootDir(moduleFile))
+
+  # One parse pass: bare name -> the imports it declares.
+  var imports = initTable[string, seq[string]]()
+  var byName = initTable[string, string]()
+  var imported: HashSet[string]
+  for f in files:
+    let parsed = parseNimFile(f)
+    if parsed.ast == nil: continue
+    var names: seq[string] = @[]
+    for imp in extractExistingImports(parsed.ast): names.add imp.bareName
+    imports[f.bareName] = names
+    byName[f.bareName] = f
+    for n in names: imported.incl n
+
+  proc reaches(start: string): bool =
+    ## Does `start` pull in `target`, directly or transitively?
+    var seen = [start].toHashSet
+    var queue = @[start]
+    var i = 0
+    while i < queue.len:
+      let cur = queue[i]; i.inc
+      for imp in imports.getOrDefault(cur):
+        if imp == target: return true
+        if imp notin seen and imp in imports:
+          seen.incl imp; queue.add imp
+    false
+
+  var tops: seq[string] = @[]
+  for name in imports.keys:
+    if name != target and name notin imported: tops.add name
+  tops.sort()
+  for name in tops:
+    if reaches(name): return byName[name]
+  moduleFile
+
 proc symbolIsExported*(filePath, symbol: string): bool =
   ## True when `filePath` declares an exported routine or type named `symbol`.
   let parsed = parseNimFile(filePath)

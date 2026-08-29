@@ -1,7 +1,7 @@
 import std/[os, strutils, json]
 import tools/[find_import_tool, import_tool, move_tool, delete_tool, rename_tool,
               inspect_tool, extract_tool, doc_tool, api_tool, effects_tool,
-              references_tool]
+              references_tool, check_tool]
 import shared/exit_codes
 
 proc printHelp() =
@@ -24,6 +24,7 @@ Available Commands:
   rename-symbol  Whole-file token rename (skips strings & comments)
   rename-scoped  Rename one binding + its uses (--at:LINE:COL)
   rename-project Rename an exported symbol across its importers (--at:LINE:COL)
+  syntax-check   Does the file still parse? (~0.8ms, syntax only, no imports)
   inspect        Emit comprehensive JSON model of a file (AST, symbols, complexity)
   extract        Print one symbol's signature + doc (--body for full source)
   missing-docs   List exported routines that have no doc comment
@@ -103,6 +104,8 @@ proc dispatch(args: seq[string]): int =
     let report = inspectFile(rest[0])
     echo report.pretty()
     if report.hasKey("error"): ExitError else: ExitOk
+  of "syntax-check", "check-syntax", "parse-check":
+    check_tool.main(rest)
   of "extract", "show":
     extract_tool.main(rest)
   of "missing-docs", "undocumented":
