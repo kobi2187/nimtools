@@ -1,7 +1,7 @@
 import std/[os, strutils, json]
 import tools/[find_import_tool, import_tool, move_tool, delete_tool, rename_tool,
               inspect_tool, extract_tool, doc_tool, api_tool, effects_tool,
-              references_tool, check_tool]
+              references_tool, check_tool, organize_imports_tool]
 import shared/exit_codes
 
 proc printHelp() =
@@ -19,6 +19,7 @@ Available Commands:
   project-references  Every use of a symbol across its importing modules
   add-import     Deterministically insert an import into a file
   rm-import      Deterministically remove an import from a file
+  organize-imports  Sort and dedupe a file's imports (std, third-party, local)
   move-symbol    Migrate procs/types between files with auto-export & import wiring
   delete-symbol  Remove a proc/type definition (refuses if still referenced)
   rename-symbol  Whole-file token rename (skips strings & comments)
@@ -79,6 +80,8 @@ proc dispatch(args: seq[string]): int =
     for m in rest[1..^1]:
       if not removeImportFromFile(rest[0], m): return ExitError
     ExitOk
+  of "organize-imports", "sort-imports":
+    organize_imports_tool.main(rest)
   of "move-symbol", "move-proc", "move-type", "move":
     var force = false
     var pos: seq[string] = @[]

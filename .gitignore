@@ -38,3 +38,5 @@ tests/test_effects
 tests/test_imports
 tests/test_suggest
 tests/test_check
+tools/organize_imports_tool
+tests/test_organize_imports
