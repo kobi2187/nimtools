@@ -165,3 +165,42 @@ proc alreadyHere*(): string =
     check "import std/os" in destText       # dest's own pre-existing code needs it
     check "import std/strutils" in destText # moved code needs it too
     check "alreadyHere" in destText
+
+suite "move-symbol places code near its first use, not always at EOF":
+  test "inserts before the first destination statement that references the moved symbol":
+    let (src, dest) = setupFiles()
+    writeFile(src, """
+proc moved*(x: int): int =
+  x * 2
+""")
+    writeFile(dest, """
+proc unrelatedBefore*(): int =
+  1
+
+proc callsIt*(): int =
+  moved(5)
+
+proc unrelatedAfter*(): int =
+  2
+""")
+    let r = moveSymbols(src, dest, @["moved"])
+    check r.status == mvMoved
+    let destText = readFile(dest)
+    check destText.find("proc moved*") < destText.find("proc callsIt*")
+    check destText.find("proc unrelatedBefore*") < destText.find("proc moved*")
+    check "proc unrelatedAfter*" in destText   # still present, untouched
+
+  test "falls back to append at EOF when nothing in dest references it":
+    let (src, dest) = setupFiles()
+    writeFile(src, """
+proc moved*(): int =
+  1
+""")
+    writeFile(dest, """
+proc unrelated*(): int =
+  2
+""")
+    let r = moveSymbols(src, dest, @["moved"])
+    check r.status == mvMoved
+    let destText = readFile(dest)
+    check destText.find("proc unrelated*") < destText.find("proc moved*")

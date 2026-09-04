@@ -138,6 +138,9 @@ proc moveSymbols*(sourceFile, destFile: string, symbolNames: seq[string],
     return MoveResult(status: mvError,
       message: "None of the specified symbols were found in " & sourceFile)
 
+  var movedNames: seq[string] = @[]
+  for s in foundSymbols: movedNames.add s.name
+
   # Refuse before writing anything if the move would break the destination.
   if not force:
     let missing = findLeftBehindDeps(parsed.ast, foundSymbols)
@@ -188,11 +191,39 @@ proc moveSymbols*(sourceFile, destFile: string, symbolNames: seq[string],
   for sym in destOrder: extractedBlocks.add codeByLine[sym.startLine]
   let appendedCode = extractedBlocks.join("\n\n") & "\n"
 
-  # Append to destination file
+  # Place the moved code before the destination's first reference to it,
+  # rather than always at EOF -- a proc dumped at the tail of an unrelated
+  # file regardless of where it's actually used is a readability regression
+  # an agent has no reason to introduce. Falls back to append when nothing in
+  # the destination references any moved name (or destFile doesn't exist yet).
+  var insertBeforeLine = 0   # 0 means "no reference found, append at EOF"
   if fileExists(destFile):
     let destContent = readFile(destFile)
-    writeFile(destFile, destContent.strip(trailing = true) & "\n\n" & appendedCode)
-    echo "Appended ", extractedBlocks.len, " symbol(s) to ", destFile
+    let destParsed = parseNimString(destContent, destFile)
+    if destParsed.ast != nil and destParsed.ast.kind == nkStmtList:
+      for stmt in destParsed.ast:
+        var used: seq[string] = @[]
+        collectIdents(stmt, used)
+        var refsMoved = false
+        for nm in movedNames:
+          if nm in used: refsMoved = true
+        if refsMoved:
+          insertBeforeLine = stmt.info.line.int
+          break
+
+  if fileExists(destFile):
+    let destContent = readFile(destFile)
+    if insertBeforeLine > 0:
+      let destLines = destContent.splitLines
+      let before = destLines[0 ..< insertBeforeLine - 1].join("\n")
+      let after = destLines[insertBeforeLine - 1 .. ^1].join("\n")
+      writeFile(destFile,
+        before.strip(trailing = true) & "\n\n" & appendedCode & "\n" & after)
+      echo "Inserted ", extractedBlocks.len, " symbol(s) into ", destFile,
+           " before line ", insertBeforeLine
+    else:
+      writeFile(destFile, destContent.strip(trailing = true) & "\n\n" & appendedCode)
+      echo "Appended ", extractedBlocks.len, " symbol(s) to ", destFile
   else:
     writeFile(destFile, appendedCode)
     echo "Created destination file ", destFile, " with ", extractedBlocks.len, " symbol(s)"
@@ -215,8 +246,6 @@ proc moveSymbols*(sourceFile, destFile: string, symbolNames: seq[string],
   # Wire the import in the source file ONLY when code that stayed behind still
   # references a moved symbol. Adding it unconditionally leaves a dead import
   # (and an `unused-imports` warning) when the move took the module's only proc.
-  var movedNames: seq[string] = @[]
-  for s in foundSymbols: movedNames.add s.name
   var remainingIdents: seq[string] = @[]
   let remainingAst = parseNimString(stripBlankLines(updatedSource), sourceFile).ast
   if remainingAst != nil: collectIdents(remainingAst, remainingIdents)
