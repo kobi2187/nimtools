@@ -124,3 +124,44 @@ proc greet*(name: string, loud: bool): string =
     check "proc greet*(name: string): string" in destText
     check "proc greet*(name: string, loud: bool): string" in destText
     check destText.count("proc greet*") == 2
+
+suite "move-symbol carries and prunes imports":
+  test "the destination gains an import the moved code needs, but not one it doesn't":
+    let (src, dest) = setupFiles()
+    writeFile(src, """
+import std/strutils
+import std/os
+
+proc stays*(): string =
+  getEnv("HOME")
+
+proc moved*(): string =
+  "hi".toUpperAscii()
+""")
+    let r = moveSymbols(src, dest, @["moved"])
+    check r.status == mvMoved
+    let destText = readFile(dest)
+    check "import std/strutils" in destText   # moved code needs it
+    check "import std/os" notin destText      # only 'stays' needed it -- pruned
+    check "toUpperAscii" in destText
+
+  test "an import the destination's own pre-existing code needs is not pruned":
+    let (src, dest) = setupFiles()
+    writeFile(src, """
+import std/strutils
+
+proc moved*(): string =
+  "hi".toUpperAscii()
+""")
+    writeFile(dest, """
+import std/os
+
+proc alreadyHere*(): string =
+  getEnv("HOME")
+""")
+    let r = moveSymbols(src, dest, @["moved"])
+    check r.status == mvMoved
+    let destText = readFile(dest)
+    check "import std/os" in destText       # dest's own pre-existing code needs it
+    check "import std/strutils" in destText # moved code needs it too
+    check "alreadyHere" in destText

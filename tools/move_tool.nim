@@ -197,6 +197,21 @@ proc moveSymbols*(sourceFile, destFile: string, symbolNames: seq[string],
     writeFile(destFile, appendedCode)
     echo "Created destination file ", destFile, " with ", extractedBlocks.len, " symbol(s)"
 
+  # Carry the source file's imports over, then prune whatever the destination
+  # doesn't actually need. The moved code may depend on any of the source
+  # file's imports (which one, specifically, is exactly the UFCS-shaped
+  # ambiguity the parser cannot resolve -- see references_tool's semantic
+  # path), so this copies all of them rather than guessing, then runs the
+  # same unused-import detection `unused-imports` already exposes to remove
+  # what turned out to be dead. An import destFile's own pre-existing code
+  # already needed is never touched: findUnusedImports scans the merged file,
+  # so anything still referenced by either side survives the prune.
+  let sourceImports = extractExistingImports(parsed.ast)
+  for imp in sourceImports:
+    discard addImportToFile(destFile, imp)
+  for u in findUnusedImports(destFile):
+    discard removeImportFromFile(destFile, u.module)
+
   # Wire the import in the source file ONLY when code that stayed behind still
   # references a moved symbol. Adding it unconditionally leaves a dead import
   # (and an `unused-imports` warning) when the move took the module's only proc.
