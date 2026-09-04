@@ -102,3 +102,25 @@ proc isOdd*(n: int): bool =
     let r = moveSymbols(src, dest, @["isEven", "isOdd"], force = true)
     check r.status == mvMoved
     check fileExists(dest)
+
+suite "move-symbol overloads":
+  # Regression: codeByName (and topoSortMoved's byName) were Table[string, ...]
+  # keyed only by symbol name. Two overloads share a name, so the second write
+  # silently overwrote the first -- both copies in the destination ended up
+  # identical to whichever overload was written last, and the OTHER overload's
+  # code was lost entirely (not left behind either -- gone).
+  test "moving two overloads together keeps both distinct signatures":
+    let (src, dest) = setupFiles()
+    writeFile(src, """
+proc greet*(name: string): string =
+  "hi " & name
+
+proc greet*(name: string, loud: bool): string =
+  "HI " & name
+""")
+    let r = moveSymbols(src, dest, @["greet"])
+    check r.status == mvMoved
+    let destText = readFile(dest)
+    check "proc greet*(name: string): string" in destText
+    check "proc greet*(name: string, loud: bool): string" in destText
+    check destText.count("proc greet*") == 2

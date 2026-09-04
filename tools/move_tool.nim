@@ -22,6 +22,18 @@ proc collectIdents(n: PNode, acc: var seq[string]) =
   elif hasSons(n):
     for c in n: collectIdents(c, acc)
 
+proc collectIdentUses(n: PNode): seq[string] =
+  ## Like collectIdents, but skips child 0 -- the name slot both routine defs
+  ## and typedefs use (per routineName/typeDefName) to declare what THIS node
+  ## defines, not a reference to something else. Used only for the moved-set
+  ## dependency graph below: without this exclusion, an overloaded proc's own
+  ## name in its own signature looked like a self-reference to its sibling
+  ## overload of the same name, producing a false mutual-dependency cycle
+  ## between two overloads that never actually call each other.
+  if n == nil or n.len == 0: return @[]
+  for i in 1 ..< n.len:
+    collectIdents(n[i], result)
+
 proc findLeftBehindDeps*(root: PNode, moved: seq[FoundSymbol]): seq[string] =
   ## Returns names defined in the source file that the moved code references
   ## but which are NOT themselves being moved. These are exactly the symbols
@@ -58,37 +70,42 @@ proc topoSortMoved*(moved: seq[FoundSymbol]): tuple[order: seq[FoundSymbol], cyc
   ## decl stub, which this tool does not synthesize. Returns the cycle's names
   ## instead so the caller can refuse rather than emit a silently-still-broken
   ## order.
-  var deps = initTable[string, seq[string]]()
-  var byName = initTable[string, FoundSymbol]()
-  var names: seq[string] = @[]
-  for m in moved:
-    byName[m.name] = m
-    names.add m.name
+  ## Indices, not names, identify each moved symbol in this graph. Two
+  ## overloads share a name -- keying by name alone (a prior version used
+  ## Table[string, FoundSymbol]) silently collapsed them onto whichever write
+  ## landed last, losing the other overload's code entirely. Since the parser
+  ## cannot tell which overload an identifier-by-name reference resolves to,
+  ## an identifier matching any co-named moved symbol conservatively depends
+  ## on ALL of them (except itself) -- the same "conservative in the safe
+  ## direction" rule move-symbol already applies elsewhere.
+  let n = moved.len
+  var indicesByName = initTable[string, seq[int]]()
+  for i, m in moved: indicesByName.mgetOrPut(m.name, @[]).add i
 
-  for m in moved:
-    var used: seq[string] = @[]
-    collectIdents(m.node, used)
-    var ds: seq[string] = @[]
+  var deps = newSeq[seq[int]](n)
+  for i, m in moved:
+    let used = collectIdentUses(m.node)
+    var ds: seq[int] = @[]
     for u in used:
-      if u in byName and u != m.name and u notin ds: ds.add u
-    deps[m.name] = ds
+      if u in indicesByName:
+        for j in indicesByName[u]:
+          if j != i and j notin ds: ds.add j
+    deps[i] = ds
 
-  # Kahn's algorithm over the small moved-set graph. Edge d -> n means
-  # "d must come before n".
-  var indeg = initTable[string, int]()
-  for n in names: indeg[n] = 0
-  var adj = initTable[string, seq[string]]()
-  for n in names: adj[n] = @[]
-  for n in names:
-    for d in deps[n]:
-      adj[d].add n
-      indeg[n].inc
+  # Kahn's algorithm over the small moved-set graph. Edge d -> i means
+  # "d must come before i".
+  var indeg = newSeq[int](n)
+  var adj = newSeq[seq[int]](n)
+  for i in 0 ..< n:
+    for d in deps[i]:
+      adj[d].add i
+      indeg[i].inc
 
-  var queue: seq[string] = @[]
-  for n in names:
-    if indeg[n] == 0: queue.add n
+  var queue: seq[int] = @[]
+  for i in 0 ..< n:
+    if indeg[i] == 0: queue.add i
   var qi = 0
-  var ordered: seq[string] = @[]
+  var ordered: seq[int] = @[]
   while qi < queue.len:
     let cur = queue[qi]; qi.inc
     ordered.add cur
@@ -96,14 +113,14 @@ proc topoSortMoved*(moved: seq[FoundSymbol]): tuple[order: seq[FoundSymbol], cyc
       indeg[nxt].dec
       if indeg[nxt] == 0: queue.add nxt
 
-  if ordered.len != names.len:
+  if ordered.len != n:
     var remaining: seq[string] = @[]
-    for n in names:
-      if n notin ordered: remaining.add n
+    for i in 0 ..< n:
+      if i notin ordered: remaining.add moved[i].name
     return (moved, remaining)
 
   var out2: seq[FoundSymbol] = @[]
-  for n in ordered: out2.add byName[n]
+  for i in ordered: out2.add moved[i]
   (out2, @[])
 
 proc moveSymbols*(sourceFile, destFile: string, symbolNames: seq[string],
@@ -147,13 +164,18 @@ proc moveSymbols*(sourceFile, destFile: string, symbolNames: seq[string],
   var sortedSymbols = foundSymbols
   sortedSymbols.sort(proc(a, b: FoundSymbol): int = cmp(b.startLine, a.startLine))
 
-  var codeByName = initTable[string, string]()
+  # Keyed by startLine, not name: two overloads share a name, and a
+  # Table[string, string] here previously let the second extraction overwrite
+  # the first, so one overload's code vanished and the destination ended up
+  # with two identical copies of the other. startLine is unique per symbol
+  # within one file, which name alone is not.
+  var codeByLine = initTable[int, string]()
   var updatedSource = sourceContent
 
   for sym in sortedSymbols:
     let rawCode = extractLineRange(sourceContent, sym.startLine, sym.endLine)
     # Ensure exported with '*'
-    codeByName[sym.name] = ensureSymbolExported(rawCode, sym.name)
+    codeByLine[sym.startLine] = ensureSymbolExported(rawCode, sym.name)
     # Cut from source
     updatedSource = replaceLineRange(updatedSource, sym.startLine, sym.endLine, "")
     echo "Extracted '", sym.name, "' (lines ", sym.startLine, "..", sym.endLine, ")"
@@ -163,7 +185,7 @@ proc moveSymbols*(sourceFile, destFile: string, symbolNames: seq[string],
   echo "Removed extracted symbols from ", sourceFile
 
   var extractedBlocks: seq[string] = @[]
-  for sym in destOrder: extractedBlocks.add codeByName[sym.name]
+  for sym in destOrder: extractedBlocks.add codeByLine[sym.startLine]
   let appendedCode = extractedBlocks.join("\n\n") & "\n"
 
   # Append to destination file
