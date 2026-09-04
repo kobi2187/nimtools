@@ -1,72 +1,65 @@
 # nimtools
 
-Static analysis and refactoring toolkit for Nim, built on Nim's own compiler as a library.
-Targets AI agents as the primary caller: every tool returns structured exit codes (`0` ok,
-`1` error, `2` refused) and machine-parseable output, not just human-readable text.
+A command-line toolkit for reading, checking, and rewriting Nim code, built directly on
+Nim's own compiler (parser + nimsuggest) instead of regexes or string matching. It's meant
+to be driven by an AI coding agent as much as by a person — every command gives a clear
+exit code (0 = done, 1 = error, 2 = refused) and either plain text or `--json` output, so
+a script or an agent can act on the result without guessing.
 
 ## Build
 
-No `.nimble`, no config. Build each binary manually:
-
 ```bash
-nim c -d:release nimtools.nim      # umbrella CLI
-nim c -d:release cyc.nim           # complexity auditor
-nim c -d:release nimoutline.nim    # outline generator
-nim c -d:release tools/inspect_tool.nim   # each tools/*.nim is also standalone
+nim c -d:release nimtools.nim      # the umbrella CLI
 ```
 
-See `CLAUDE.md` for the portable build form (needed off this machine's Nim source checkout).
+Each tool also builds and runs standalone (`nim c -d:release tools/move_tool.nim`), but
+`nimtools <command> ...` is the normal way to use them.
 
-## Tools
+## What it does
 
-Run via the umbrella CLI (`nimtools <command> ...`) or each `tools/*.nim` standalone.
+**Look at code**
+- `outline` — one-line summary of every type and routine in a file, with line numbers.
+- `inspect` — a full JSON model of a file: imports, types, routines, complexity.
+- `extract` — print one symbol's signature (or full body) by name.
+- `api-surface` — what a module exports, without opening it.
+- `api-diff` — did this change break the public API?
+- `cyc` — cyclomatic complexity per routine, for spotting code that's grown too tangled.
+- `type-report` — the resolved type of an expression, a function's locals, or a whole
+  module's declarations (uses the real compiler, not a guess).
+- `syntax-check` — does this file still parse? Milliseconds, no compiling.
 
-| Command | Purpose |
-|---|---|
-| `outline` | One-line type/routine signatures with line numbers |
-| `cyc` | McCabe cyclomatic complexity, AST-based (not regex) |
-| `inspect` | JSON model of a file: imports, types, routines |
-| `extract` | Pull one symbol's signature or full body by name |
-| `api-surface` / `api-diff` | Exported (or `--all`) symbols, module + per-symbol docs |
-| `find-import` | Symbol search across stdlib/nimble/project → import path |
-| `import` | Add/remove imports |
-| `move-symbol` | Move a proc/type between files; refuses unsafe moves |
-| `delete-symbol` | Delete a symbol; refuses if still referenced in-file |
-| `rename-symbol` | Token-level rename in one file |
-| `rename-scoped` | Scope-aware rename of one binding (`--at:LINE:COL`) |
-| `rename-project` | Cross-file rename of an exported symbol |
-| `references` / `project-references` | Find uses; `--semantic` for a complete answer via nimsuggest |
-| `syntax-check` | Does it parse — 0.8ms/file, no imports loaded |
-| `change-signature` | Add/remove/reorder a proc's params; fixes up every call site |
-| `organize-imports` | Sort and dedupe a file's imports |
-| `extract-variable` | Pull a selected expression into a `let` above its statement |
-| `type-report` | Resolved type at a point / of a function's locals / of a whole module |
-| `doc` | Routines missing doc comments |
+**Find things**
+- `find-import` — "I need `X`, what do I import?" — searches stdlib, nimble packages,
+  and the project itself.
+- `references` / `project-references` — every place a symbol is used, in one file or
+  across every file that imports it. Add `--semantic` for a fully accurate answer (slower,
+  but correct even for method-call-style syntax the plain parser can't resolve).
+- `unused-imports` / `missing-docs` / `raises` / `func-candidates` — small reports:
+  dead imports, undocumented routines, what a proc can throw, procs that look pure.
 
-## Design
+**Change code**
+- `rename-symbol` / `rename-scoped` / `rename-project` — rename something, from a
+  simple whole-file text rename up to a project-wide rename of an exported symbol.
+- `move-symbol` — move a proc or type to another file. Carries over the imports it
+  needs, drops the ones it doesn't, and places it near where it's actually used instead
+  of just dumping it at the end of the file.
+- `delete-symbol` — remove a definition, but refuses if anything still uses it.
+- `change-signature` — add, remove, or reorder a proc's parameters and automatically
+  fix up every call site.
+- `extract-variable` — pull a piece of an expression out into its own `let`.
+- `organize-imports` / `add-import` / `rm-import` — keep a file's imports sorted,
+  deduped, and correct.
 
-- **Parser vs semantic, and the answer says which one replied.** Parser tools (`outline`,
-  `api-surface`, `cyc`, `inspect`, `extract`) are fast and correct for *shape*. `references
-  --semantic` drives `nimsuggest` for *identity* (UFCS/qualified calls the parser can't resolve)
-  and never silently falls back — if nimsuggest is unavailable it exits `1`, not a wrong answer.
-- **Refuse rather than corrupt.** Write tools analyze whether an edit is safe before applying it
-  and decline (exit `2`) rather than emit broken code. `--force` overrides.
-- **Exit codes are the API.** `0` includes a no-op success; `1` is error; `2` is a deliberate
-  refusal — an agent branches on these, not on stdout text.
+## Why it refuses instead of guessing
 
-Full architecture, rationale, and known gaps: see `CLAUDE.md`.
+A few commands can return exit code 2 instead of doing what you asked — that means the
+tool understood the request but doing it would produce code that doesn't compile (e.g.
+moving a proc without the type it depends on, or removing a parameter some call site
+still needs). Pass `--force` to do it anyway. The idea is that a tool an agent runs
+unattended should never silently write broken code.
 
 ## Tests
 
 ```bash
-./tests/run.sh                          # all suites
-nim c --hints:off -r tests/test_move.nim # one suite
-```
-
-`std/unittest`, no external dependencies.
-
-## Self-audit
-
-```bash
-./cyc *.nim tools/*.nim shared/*.nim     # baseline: debt 258, heavy 10, over-5 34/65
+./tests/run.sh
 ```
