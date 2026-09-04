@@ -50,11 +50,20 @@ proc declarationPos*(n: PNode): tuple[line, col: int] =
 
 proc nodeLineBounds*(n: PNode): tuple[startLine, endLine: int] =
   ## Computes the line span [startLine, endLine] of a node in the source file.
+  ##
+  ## nkEmpty nodes are excluded from the walk. An nkEmpty carries no source
+  ## text of its own -- it is the parser's placeholder for "nothing here"
+  ## (a missing type, a missing default value, a missing return type) -- but
+  ## its `.info` position is NOT nil or (0,0); the parser sets it to wherever
+  ## its cursor happened to land next. For an nkIdentDefs field with no default
+  ## value, that is the position of the FOLLOWING declaration, not this one's.
+  ## Counting it inflated a type's span into its neighboring typedef's territory,
+  ## which made move-symbol extract and delete one line too many.
   if n == nil: return (0, 0)
   var lo = n.info.line.int
   var hi = lo
   proc walk(x: PNode) =
-    if x == nil: return
+    if x == nil or x.kind == nkEmpty: return
     let l = x.info.line.int
     if l > hi: hi = l
     if l < lo and l > 0: lo = l
